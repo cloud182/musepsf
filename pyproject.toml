@@ -1,15 +1,24 @@
 [tool.poetry]
 name = "musepsf"
-version = "0.1.0"
+version = "0.2.0"
 description = "Measure the FWHM of MUSE PSF using cross convolution and a reference image"
 authors = ["Enrico Congiu"]
 license = "MIT"
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.9"
+python = "^3.9,<3.12"
+astropy = "^5.2.2"
+numpy = "^1.24.2"
+scipy = "^1.10.1"
+astroquery = "^0.4.6"
+photutils = "^1.6.0"
+reproject = "^0.10.0"
+regions = "^0.7"
+matplotlib = "^3.7.1"
 
 [tool.poetry.dev-dependencies]
+python = "^3.9,<3.12"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
