@@ -9,7 +9,7 @@ from scipy.optimize import leastsq
 from scipy.odr import ODR, Model, RealData
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from astropy.convolution import Moffat2DKernel, convolve_fft
-from musepsf.image import Image
+from .image import Image
 
 import os
 
@@ -38,7 +38,7 @@ class MUSEImage(Image):
         if plot:
             outname = os.path.join(self.output_dir, self.filename.replace('.fits', '_resampled.png'))
             plot_images(self.data, reference.data, 'MUSE', 'Reference', outname,
-                        save=False, show=True)
+                        save=save, show=show)
 
         # rescaling the flux
         self.check_flux_calibration(reference.data, plot=plot, save=save, show=show)
@@ -65,11 +65,11 @@ class MUSEImage(Image):
         edge = kwargs.get('edge', 10)
         if fit_alpha:
             self.res = leastsq(self.to_minimize, x0=[0.8, self.alpha],
-                               args=(reference.data, False, False, None, edge),
+                               args=(reference.data, False, False, False, None, edge),
                             maxfev=600, xtol=1e-8, full_output=True)
         else:
             self.res = leastsq(self.to_minimize, x0=[0.8],
-                               args=(reference.data, False, False, None, edge),
+                               args=(reference.data, False, False, False, None, edge),
                                maxfev=600, xtol=1e-8, full_output=True)
 
         self.best_fit = self.res[0]
@@ -80,10 +80,10 @@ class MUSEImage(Image):
             print(f'Measured alpha = {self.best_fit[1]}')
 
         figname = os.path.join(self.output_dir, self.filename.replace('.fits', '_final.png'))
-        function = self.to_minimize(self.best_fit, reference.data, plot=True, save=True,
+        function = self.to_minimize(self.best_fit, reference.data, plot=plot, save=save, show=show,
                                     figname=figname, edge=edge)
 
-    def to_minimize(self, pars, reference, plot=False, save=False,
+    def to_minimize(self, pars, reference, plot=False, save=False, show=False,
                     figname=None, edge=10):
 
         if len(pars) == 1:
@@ -148,7 +148,10 @@ class MUSEImage(Image):
             fig.colorbar(img3, cax=cax3)
             if save:
                 plt.savefig(figname, dpi=150)
-            plt.show()
+            if show:
+                plt.show()
+            else:
+                plt.close()
 
         # leastsq requires the array of residuals to be minimized
         function = (MUSE_masked-ref_masked)
