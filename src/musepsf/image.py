@@ -10,7 +10,6 @@ from astropy.table import Table
 from astropy.stats import sigma_clipped_stats
 from astropy.nddata import NDData, Cutout2D
 from astropy.coordinates import SkyCoord
-from astropy.modeling import models, fitting
 from astroquery.gaia import Gaia
 from photutils.psf import extract_stars
 from reproject import reproject_interp
@@ -18,28 +17,21 @@ from regions import EllipseSkyRegion
 from photutils import EPSFBuilder
 
 import sys
+import os
 
-# configure astroquery gaia
-Gaia.ROW_LIMIT = 10000
-Gaia.MAIN_GAIA_TABLE = "gaiadr3.gaia_source"
-
-def query_gaia(center, radius):
-
-    r = Gaia.query_object_async(coordinate=center, radius=radius)
-    r = r['ra', 'dec', 'parallax', 'phot_g_mean_mag', 'classprob_dsc_combmod_star'].copy()
-    mask = np.abs(r['classprob_dsc_combmod_star']) > 0.99
-    r = r[mask].copy()
-    return r
-
+from .utils import query_gaia
 
 class Image:
 
-    def __init__(self, filename, datahdu=0, headerhdu=None, debug=False, units=None):
+    def __init__(self, filename, input_dir='./', output_dir='./',
+                 datahdu=0, headerhdu=None, debug=False, units=None):
 
         self.filename = filename
+        self.input_dir = input_dir
+        self.output_dir = output_dir
         self.datahdu = datahdu
 
-        with fits.open(self.filename) as hdu:
+        with fits.open(os.path.join(self.input_dir, self.filename)) as hdu:
             self.data = hdu[self.datahdu].data
             self.header = hdu[self.datahdu].header
             if headerhdu is not None:
@@ -110,11 +102,12 @@ class Image:
             gaia_cat = gaia_cat[~mask2].copy()
 
         self.stars = gaia_cat
-        self.stars.write(self.filename.replace('.fits', '.stars.fits'), overwrite=True)
+        outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.fits'))
+        self.stars.write(outname, overwrite=True)
 
     def build_startable(self, coords):
 
-        x, y = np.zeros(len(coords)), np.zeros(len(coords))
+        x, y = np.empty(len(coords)), np.empty(len(coords))
 
         # fitter = fitting.LevMarLSQFitter()
 
@@ -203,7 +196,8 @@ class Image:
         ax2.set_title('PSF - 3D')
         ax3.set_title('Residuals')
         if save:
-            plt.savefig(self.filename.replace('.fits', '.psf.png'), dpi=300)
+            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.png'))
+            plt.savefig(outname, dpi=300)
         if show:
             plt.show()
         else:
@@ -218,7 +212,7 @@ class Image:
         else:
             hdu = fits.PrimaryHDU(new_psf.data / psf_flux)
             self.psf = new_psf.data / psf_flux
-        out = self.filename.replace('.fits', '.psf.fits')
+        out = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.fits'))
         hdu.writeto(out, overwrite=True)
 
     def convert_units(self, out_units, equivalency=None):
