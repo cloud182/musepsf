@@ -68,6 +68,7 @@ def locate_stars(image, **kwargs):
     fwhm = kwargs.get('fwhm', 3)
     brightest = kwargs.get('brightest', 5)
     sigma = kwargs.get('sigma', 3.)
+    radius = kwargs.get('radius', 20)
 
     # Define a threshold to look for stars
     mean, median, std = sigma_clipped_stats(image, sigma=sigma)
@@ -78,11 +79,16 @@ def locate_stars(image, **kwargs):
     sources = starfinder(image)
 
     if sources is not None:
+        yy, xx = np.mgrid[ :image.shape[0], :image.shape[1]]
         stars = sources['xcentroid', 'ycentroid']
+        for star in stars:
+            distance = np.sqrt((xx-star['xcentroid'])**2+(yy-star['ycentroid'])**2)
+            mask = distance < radius
     else:
         stars = None
+        mask = None
 
-    return stars
+    return stars, mask
 
 def moffat_kernel(fwhm, alpha, scale=0.238, img_size=241):
     """
@@ -105,16 +111,13 @@ def moffat_kernel(fwhm, alpha, scale=0.238, img_size=241):
 
     return moffat_k
 
-def apply_mask(image1, image2, stars, edge=5, radius=20):
+def apply_mask(image1, image2, starmask, edge=5, radius=20):
 
-    xx, yy = np.mgrid[ :image1.shape[1], :image1.shape[0]]
-
-    if stars is not None:
-        for star in stars:
-            distance = np.sqrt((xx-star['xcentroid'])**2+(yy-star['ycentroid'])**2)
-            mask = distance < radius
-            image1[mask] = np.nan
-            image2[mask] = np.nan
+    if starmask is not None:
+            assert starmask.shape == image1.shape, 'Mask and image1 are of different shape'
+            assert starmask.shape == image2.shape, 'Mask and image2 are of different shape'
+            image1[starmask] = np.nan
+            image2[starmask] = np.nan
 
     if edge != 0:
         return image1[edge:-edge, edge:-edge], image2[edge:-edge, edge:-edge]

@@ -43,7 +43,7 @@ class MUSEImage(Image):
         # rescaling the flux
         self.check_flux_calibration(reference.data, plot=plot, save=save, show=show)
 
-        self.stars = locate_stars(self.data, **kwargs)
+        self.stars, self.starmask = locate_stars(self.data, **kwargs)
 
         self.convolved = convolve_fft(self.data, reference.psf)
 
@@ -99,7 +99,7 @@ class MUSEImage(Image):
         # convolving WFI image for the model of MUSE PSF
         reference_conv = convolve_fft(reference, ker_MUSE)
 
-        MUSE_masked, ref_masked = apply_mask(self.convolved, reference_conv, self.stars,
+        MUSE_masked, ref_masked = apply_mask(self.convolved, reference_conv, self.starmask,
                                              edge=edge, radius=20)
 
         # plotting the results of the convolution if required
