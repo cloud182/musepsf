@@ -182,7 +182,7 @@ class MUSEImage(Image):
             plt.ylabel('Flux WFI')
             plt.xlabel('Flux MUSE')
             if save:
-                outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.scatter.png'))
+                outname = os.path.join(self.output_dir, self.filename.replace('.fits', '_scatter.png'))
                 plt.savefig(outname)
             if show:
                 plt.show()
@@ -198,7 +198,7 @@ class MUSEImage(Image):
         rescaled = self.data/reference
         print('Correction applied.')
         if plot:
-            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.rescaled.png'))
+            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '_rescaled.png'))
             plot_images(orig, rescaled, 'Original', 'Rescaled,', outname,
                         save=save, show=show)
 
