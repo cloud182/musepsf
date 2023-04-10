@@ -79,11 +79,12 @@ def locate_stars(image, **kwargs):
     sources = starfinder(image)
 
     if sources is not None:
+        mask = np.zeros(image.shape, dtype=bool)
         yy, xx = np.mgrid[ :image.shape[0], :image.shape[1]]
         stars = sources['xcentroid', 'ycentroid']
         for star in stars:
             distance = np.sqrt((xx-star['xcentroid'])**2+(yy-star['ycentroid'])**2)
-            mask = distance < radius
+            mask[distance < radius] = True
     else:
         stars = None
         mask = None
@@ -111,7 +112,7 @@ def moffat_kernel(fwhm, alpha, scale=0.238, img_size=241):
 
     return moffat_k
 
-def apply_mask(image1, image2, starmask, edge=5, radius=20):
+def apply_mask(image1, image2, starmask, edge=5):
 
     if starmask is not None:
             assert starmask.shape == image1.shape, 'Mask and image1 are of different shape'

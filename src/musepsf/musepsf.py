@@ -3,17 +3,15 @@ import astropy.units as u
 import matplotlib.pyplot as plt
 import astropy.visualization as vis
 
-from astropy.stats import sigma_clipped_stats
-from photutils.detection import DAOStarFinder
 from scipy.optimize import leastsq
 from scipy.odr import ODR, Model, RealData
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-from astropy.convolution import Moffat2DKernel, convolve_fft
+from astropy.convolution import convolve_fft
 from .image import Image
 
 import os
 
-from .utils import get_norm, plot_images, bin_image, linear_function, locate_stars, \
+from .utils import plot_images, bin_image, linear_function, locate_stars, \
     moffat_kernel, apply_mask
 
 
@@ -66,7 +64,7 @@ class MUSEImage(Image):
         if fit_alpha:
             self.res = leastsq(self.to_minimize, x0=[0.8, self.alpha],
                                args=(reference.data, False, False, False, None, edge),
-                            maxfev=600, xtol=1e-8, full_output=True)
+                               maxfev=600, xtol=1e-8, full_output=True)
         else:
             self.res = leastsq(self.to_minimize, x0=[0.8],
                                args=(reference.data, False, False, False, None, edge),
@@ -100,7 +98,7 @@ class MUSEImage(Image):
         reference_conv = convolve_fft(reference, ker_MUSE)
 
         MUSE_masked, ref_masked = apply_mask(self.convolved, reference_conv, self.starmask,
-                                             edge=edge, radius=20)
+                                             edge=edge)
 
         # plotting the results of the convolution if required
         if plot:
