@@ -114,13 +114,17 @@ def moffat_kernel(fwhm, alpha, scale=0.238, img_size=241):
 
 def apply_mask(image1, image2, starmask, edge=5):
 
+    masked1 = np.ma.masked_array(data=image1)
+    masked2 = np.ma.masked_array(data=image2)
+
     if starmask is not None:
-            assert starmask.shape == image1.shape, 'Mask and image1 are of different shape'
-            assert starmask.shape == image2.shape, 'Mask and image2 are of different shape'
-            image1[starmask] = np.nan
-            image2[starmask] = np.nan
+        assert starmask.shape == image1.shape, 'Mask and image1 are of different shape'
+        assert starmask.shape == image2.shape, 'Mask and image2 are of different shape'
+        masked1.mask=starmask
+        masked2.mask=starmask
+
 
     if edge != 0:
-        return image1[edge:-edge, edge:-edge], image2[edge:-edge, edge:-edge]
+        return masked1[edge:-edge, edge:-edge], masked2[edge:-edge, edge:-edge]
     else:
-        return image1, image2
+        return masked1, masked2

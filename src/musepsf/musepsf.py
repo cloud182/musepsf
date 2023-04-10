@@ -61,14 +61,15 @@ class MUSEImage(Image):
 
         print('Performing the fit')
         edge = kwargs.get('edge', 10)
+        first_guess = kwargs.get('first_guess', 0.8)
         if fit_alpha:
-            self.res = leastsq(self.to_minimize, x0=[0.8, self.alpha],
+            self.res = leastsq(self.to_minimize, x0=[first_guess, self.alpha],
                                args=(reference.data, False, False, False, None, edge),
-                               maxfev=600, xtol=1e-8, full_output=True)
+                               maxfev=600, xtol=1e-9, full_output=True)
         else:
-            self.res = leastsq(self.to_minimize, x0=[0.8],
+            self.res = leastsq(self.to_minimize, x0=[first_guess],
                                args=(reference.data, False, False, False, None, edge),
-                               maxfev=600, xtol=1e-8, full_output=True)
+                               maxfev=600, xtol=1e-9, full_output=True)
 
         self.best_fit = self.res[0]
 
