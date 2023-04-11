@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "musepsf"
-version = "0.2.0"
+version = "0.3.0"
 description = "Measure the FWHM of MUSE PSF using cross convolution and a reference image"
 authors = ["Enrico Congiu"]
 license = "MIT"
@@ -19,6 +19,11 @@ matplotlib = "^3.7.1"
 
 [tool.poetry.dev-dependencies]
 python = "^3.9,<3.12"
+
+[tool.poetry.group.dev.dependencies]
+myst-nb = {version = "^0.17.1", python = "^3.10"}
+sphinx-autoapi = "^2.1.0"
+sphinx-rtd-theme = "^1.2.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
