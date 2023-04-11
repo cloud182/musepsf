@@ -11,6 +11,19 @@ Gaia.ROW_LIMIT = 10000
 Gaia.MAIN_GAIA_TABLE = "gaiadr3.gaia_source"
 
 def query_gaia(center, radius):
+    """
+    Query Gaia catalog
+
+    Args:
+        center (SkyCoord):
+            Center of the field
+        radius (astropy.units):
+            Radius of the area to be searched
+
+    Returns:
+        astropy.table.Table:
+            table with the Gaia stars in the field
+    """
 
     r = Gaia.query_object_async(coordinate=center, radius=radius)
     r = r['ra', 'dec', 'parallax', 'phot_g_mean_mag', 'classprob_dsc_combmod_star'].copy()
@@ -18,7 +31,21 @@ def query_gaia(center, radius):
     r = r[mask].copy()
     return r
 
+
 def get_norm(image, perc=99.9):
+    """
+    Normalize colorscale for plotting the images.
+
+    Args:
+        image (np.ndarray):
+            Image to be normalized
+        perc (float, optional):
+            Percentage of the points to be used to normalize the colorscale. Defaults to 99.9.
+
+    Returns:
+        astropy.visualization.ImageNormalize:
+            Normalization to be applied to the image
+    """
 
     interval = vis.PercentileInterval(perc)
     vmin, vmax = interval.get_limits(image)
@@ -26,7 +53,27 @@ def get_norm(image, perc=99.9):
                             stretch=vis.LogStretch(1000))
     return norm
 
+
 def plot_images(image1, image2, title1, title2, name, save=False, show=True):
+    """
+    Routine to plot two images side by side with the same color scale
+
+    Args:
+        image1 (np.ndarray):
+            First image to plot
+        image2 (np.ndarray):
+            Second image to plot
+        title1 (str):
+            Title of the first subplot
+        title2 (str):
+            Title of the second subplot
+        name (str):
+            Name of the final figure file
+        save (bool, optional):
+            Save the output plots. Defaults to True.
+        show (bool, optional):
+            Show the output plots. Defaults to True.
+    """
 
     fig, ax = plt.subplots(1, 2, figsize=(10, 6))
     norm = get_norm(image1)
@@ -42,6 +89,21 @@ def plot_images(image1, image2, title1, title2, name, save=False, show=True):
         plt.close()
 
 def bin_image(image, bin_size=15):
+    """
+    Bin images for flux calibration checks
+
+    Args:
+        image (np.ndarray):
+            Image to be binned
+        bin_size (int, optional):
+            size of the bins. Defaults to 15.
+
+    Returns:
+        np.ndarray:
+            Median of the flux in each bin
+        np.ndarray:
+            Standard deviation of the flux in each bin
+    """
 
     n_x = image.shape[1] // bin_size
     n_y = image.shape[0] // bin_size
@@ -64,6 +126,20 @@ def linear_function(B, x):
     return B[0]*x + B[1]
 
 def locate_stars(image, **kwargs):
+    """
+    Routine to automatically detect stars in the image using DAOStarFinder.
+
+    Args:
+        image (np.ndarray):
+            Input image
+
+    Returns:
+        (astropy.table.Table, None):
+            table containing the position of the stars identified in the image. If no stars are
+            present, None is returned.
+        (np.ndarray, None):
+            circular mask covering the emission of the stars.
+    """
 
     fwhm = kwargs.get('fwhm', 3)
     brightest = kwargs.get('brightest', 5)
@@ -93,18 +169,22 @@ def locate_stars(image, **kwargs):
 
 def moffat_kernel(fwhm, alpha, scale=0.238, img_size=241):
     """
-    Moffat kernel for FFT.
-    Input:
-        - fwhm:
-            fwhm of the Moffat kernel, in arcsec.
-        - alpha:
-            power index of the Moffat
-        - scale:
-            pixel scale of the image
-        - img_size:
-            size of the kernel. It should be an odd number.
-    """
+    Create the Moffat kernel representing MUSE PSF
 
+    Args:
+        fwhm (float):
+            FWHM (in arcsec) of the Moffat kernel
+        alpha (float):
+            Power index of the Moffat kernel
+        scale (float, optional):
+            scale to convert the FWHM from arcsec to pixels. Defaults to 0.238.
+        img_size (int, optional):
+            final size of the kernel. Defaults to 241.
+
+    Returns:
+        astropy.convolution.kernels.Moffat2DKernel:
+            Moffat kernel
+    """
     fwhm = fwhm / scale
     gamma = fwhm/(2*np.sqrt(2**(1/alpha)-1))
 
@@ -112,7 +192,27 @@ def moffat_kernel(fwhm, alpha, scale=0.238, img_size=241):
 
     return moffat_k
 
+
 def apply_mask(image1, image2, starmask, edge=5):
+    """
+    Apply the same starmask to 2 images of the same size
+
+    Args:
+        image1 (np.ndarray):
+            First image
+        image2 (np.ndarray):
+            Second image
+        starmask (np.ndarray):
+            array containing the stellar mask
+        edge (int, optional):
+            number of pixels to be removed at the edge of the images. Defaults to 5.
+
+    Returns:
+        np.ndarray:
+            Masked and trimmed version of image1
+        np.ndarray:
+            Masked and trimmed version of image2
+        """
 
     masked1 = np.ma.masked_array(data=image1)
     masked2 = np.ma.masked_array(data=image2)

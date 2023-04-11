@@ -22,18 +22,85 @@ import os
 from .utils import query_gaia
 
 class Image:
+    """
+    Basic class to manage images.
+
+    Attributes:
+        filename (str):
+            name of the input file
+        inpit_dir (str):
+            path of the input file
+        output_dir (str):
+            path where to save the output files
+        data (np.ndarray):
+            data array
+        header (astropy.header):
+            header associated to the data
+        main_header (astropy.header, None):
+            main file header if present.
+        wcs (astropy.wcs.WCS):
+            wcs information associated tot he data
+        units (astropy.units):
+            units of measurement associated to the image
+        galaxy (regions.shapes.ellipse.EllipseSkyRegion):
+            elliptical region used to mask the galaxy when recovering the gaia stars
+        debug (bool):
+            If true, additional plots will be produced.
+        psf (np.ndarray):
+            array containing the PSF of the image
+        stars (astropy.table.Table):
+            Table containing the position of the stars used to measure the PSF.
+
+    Methods:
+        resample(header=None, pixscale=None):
+            Resample the image to match a specific resolution or a specific header.
+        mask_galaxy(center, amax, amin, pa):
+            Mask the area covered by the galaxy when looking for gaia stars.
+        get_gaia_catalog(center, gmin, gmax, radius=10*u.arcmin, save=True):
+            Query the Gaia Catalog to identify stars in the field of the galaxy.
+        build_startable(coords):
+            Refine the position of the stars and build the star table that will be feed to the
+            ePSF builder
+        build_psf(center, gmin, gmax, radius=10*u.arcmin, npix=35,
+                  oversampling=4, save=True, show=True):
+            Build the ePSF of the considered image.
+        convert_units(out_units, equivalency=None):
+            Convert the unit of measurement of the image.
+        open_psf(filename):
+            Open the file containing the PSF of the image.
+    """
 
     def __init__(self, filename, input_dir='./', output_dir='./',
                  datahdu=0, headerhdu=None, debug=False, units=None):
 
+        """
+        Init method of the class
+
+        Args:
+            filename (str):
+                name of the file containing the image
+            input_dir (str, optional):
+                Location of the input file. Defaults to './'.
+            output_dir (str, optional):
+                Location where to save the output files. Defaults to './'.
+            datahdu (int, optional):
+                HDU containing the data. Defaults to 0.
+            headerhdu (int, None, optional):
+                HDU containing the main header. Defaults to None.
+            debug (bool, optional):
+                If True, several diagnostic plots will be produced. Defaults to False.
+            units (astropy.units, None, optional):
+                Units of the data extension. Defaults to None.
+        """
+
+
         self.filename = filename
         self.input_dir = input_dir
         self.output_dir = output_dir
-        self.datahdu = datahdu
 
         with fits.open(os.path.join(self.input_dir, self.filename)) as hdu:
-            self.data = hdu[self.datahdu].data
-            self.header = hdu[self.datahdu].header
+            self.data = hdu[datahdu].data
+            self.header = hdu[datahdu].header
             if headerhdu is not None:
                 self.main_header = hdu[headerhdu].header
             else:
@@ -51,8 +118,21 @@ class Image:
         self.galaxy = None
         self.debug = debug
         self.psf = None
+        self.stars = None
 
     def resample(self, header=None, pixscale=None):
+        """
+        Resample the image to match a specific resolution or a specific header.
+
+        Args:
+            header (astropy.header, optional):
+                Reference header to use for the reprojection. Defaults to None.
+            pixscale (float, optional):
+                Target pixel scale of the resampling. Defaults to None.
+
+        Raises:
+            ValueError: raised if both parameters or if no parameter is provided
+        """
 
         if header is None and pixscale is None:
             raise ValueError(f'One between header and pixscale must be defined')
@@ -81,6 +161,20 @@ class Image:
             self.wcs = image.wcs.wcs
 
     def mask_galaxy(self, center, amax, amin, pa):
+        """
+        Mask the area covered by the galaxy when looking for gaia stars.
+        The masked region is an ellipse.
+
+        Args:
+            center (SkyXCoord):
+                Center of the region to mask
+            amax (u.arcmin):
+                Major axis of the ellipse.
+            amin (u.arcmin):
+                Minor axis of the ellipse
+            pa (u.deg):
+                Position angle of the ellipse. Counted from North, counter-clockwise
+        """
         self.galaxy = EllipseSkyRegion(center, width=amin, height=amax, angle=pa)
 
         if self.debug:
@@ -90,6 +184,21 @@ class Image:
             plt.show()
 
     def get_gaia_catalog(self, center, gmin, gmax, radius=10*u.arcmin, save=True):
+        """
+        Query the Gaia Catalog to identify stars in the field of the galaxy.
+
+        Args:
+            center (SkyCoord):
+                Center of the image.
+            gmin (float):
+                Minimum magnitude to consider.
+            gmax (float):
+                Maximum magnitude to consider.
+            radius (u.arcmin, optional):
+                Radius to search for the stars. Defaults to 10*u.arcmin.
+            save (bool, optional):
+                Save the catalog of stars. Defaults to True.
+        """
 
         gaia_cat = query_gaia(center, radius)
         mask1 = (gaia_cat['phot_g_mean_mag'] >= gmin) * (gaia_cat['phot_g_mean_mag'] <= gmax)
@@ -106,6 +215,15 @@ class Image:
         self.stars.write(outname, overwrite=True)
 
     def build_startable(self, coords):
+
+        """
+        Refine the position of the stars and build the star table that will be feed to the
+        ePSF builder
+
+        Returns:
+            astropy.table.Table:
+                Astropy table with the x and y coordinates of the selected stars.
+        """
 
         x, y = np.empty(len(coords)), np.empty(len(coords))
 
@@ -143,6 +261,27 @@ class Image:
 
     def build_psf(self, center, gmin, gmax, radius=10*u.arcmin, npix=35,
                   oversampling=4, save=True, show=True):
+        """
+        Build the ePSF of the considered image. Extracted from the EPSFBuilder tutorial
+
+        Args:
+            center (SkyCoord):
+                Center of the considered field.
+            gmin (float):
+                Minimum magnitude to consider.
+            gmax (float):
+                Maximum magnitude to consider.
+            radius (u.arcmin, optional):
+                Radius to search for the stars. Defaults to 10*u.arcmin.
+            npix (int, optional):
+                Number of pixels to use to extract the cutouts of the stars. Defaults to 35.
+            oversampling (int, optional):
+                Oversampling factor for the EPSF builder. Defaults to 4.
+            save (bool, optional):
+                Save the output plots. Defaults to True.
+            show (bool, optional):
+                Show the output plots. Defaults to True.
+        """
 
         self.get_gaia_catalog(center, gmin, gmax, radius=radius)
 
@@ -216,6 +355,15 @@ class Image:
         hdu.writeto(out, overwrite=True)
 
     def convert_units(self, out_units, equivalency=None):
+        """
+        Convert the unit of measurement of the image to a different one.
+
+        Args:
+            out_units (astropy.units):
+                Final units of the image.
+            equivalency (astropy.units.equivalencies.Equivalency, optional):
+                Equivalency used to transform flux density units to flux units. Defaults to None.
+        """
 
         print(f'Updating the units from {self.units} to {out_units}')
         tmp_image = self.data * self.units
@@ -224,6 +372,13 @@ class Image:
         self.units = out_units
 
     def open_psf(self, filename):
+        """
+        Open the PSF file.
+
+        Args:
+            filename (str):
+                full path to the PSF file.
+        """
 
         with fits.open(filename) as hdu:
             psf = hdu[0].data
