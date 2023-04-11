@@ -181,9 +181,9 @@ class MUSEImage(Image):
         self.best_fit = self.res[0]
 
         print('Fit completed')
-        print(f'Measured FWHM = {self.best_fit[0]}')
+        print(f'Measured FWHM = {self.best_fit[0]:0.2f}')
         if fit_alpha:
-            print(f'Measured alpha = {self.best_fit[1]}')
+            print(f'Measured alpha = {self.best_fit[1]:0.2f}')
 
         figname = os.path.join(self.output_dir, self.filename.replace('.fits', '_final.png'))
         function = self.to_minimize(self.best_fit, reference.data, plot=plot, save=save, show=show,
