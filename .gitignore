@@ -142,4 +142,5 @@ dmypy.json
 .DS_Store
 
 # example code
-examples
+examples/*
+!Example1.ipynb
