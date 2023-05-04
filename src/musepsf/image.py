@@ -15,6 +15,7 @@ from photutils.psf import extract_stars
 from reproject import reproject_interp
 from regions import EllipseSkyRegion
 from photutils import EPSFBuilder
+from mpdaf.obj import Image as MPDAFImage
 
 import sys
 import os
@@ -150,7 +151,7 @@ class Image:
 
         if pixscale is not None:
             print('Using MPDAF to resample the image')
-            image = Image(filename=os.path.join(self.input_dir, self.filename))
+            image = MPDAFImage(filename=os.path.join(self.input_dir, self.filename))
             scale = image.get_step() * 3600
             newdim_y = int(image.shape[0] * scale[0]//pixscale)
             newdim_x = int(image.shape[1] * scale[1]//pixscale)
