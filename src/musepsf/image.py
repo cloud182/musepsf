@@ -121,7 +121,7 @@ class Image:
         self.psf = None
         self.stars = None
 
-    def resample(self, header=None, pixscale=None):
+    def resample(self, header=None, pixscale=None, inplace=True):
         """
         Resample the image to match a specific resolution or a specific header.
 
@@ -130,6 +130,18 @@ class Image:
                 Reference header to use for the reprojection. Defaults to None.
             pixscale (float, optional):
                 Target pixel scale of the resampling. Defaults to None.
+            inplace (bool, optional):
+                if true, the attributes of the curtrent object are modified. If false,
+                the data, wcs and header of the resampled image are returned in output.
+                Defaults to True.
+
+        Returns:
+            np.ndarray:
+                resampled image
+            astropy.wcs.WCS:
+                WCS of the resampled image
+            astropy.io.fits.header:
+                header of theresampled image
 
         Raises:
             ValueError: raised if both parameters or if no parameter is provided
@@ -145,9 +157,14 @@ class Image:
             area_old = self.wcs.proj_plane_pixel_area()
             area_new = WCS(header).proj_plane_pixel_area()
             factor = area_new/area_old
-            self.data *= factor
-            self.wcs = WCS(header)
-            self.header = header
+
+            if inplace:
+                self.data *= factor
+                self.wcs = WCS(header)
+                self.header = header
+            else:
+                return self.data * factor, WCS(header), header
+
 
         if pixscale is not None:
             print('Using MPDAF to resample the image')
@@ -157,9 +174,12 @@ class Image:
             newdim_x = int(image.shape[1] * scale[1]//pixscale)
             image = image.resample(newdim=(newdim_y, newdim_x), newstart=None,
                                    newstep=0.2, flux=True, order=3)
-            self.data = image.data
-            self.header = image.data_header
-            self.wcs = image.wcs.wcs
+            if inplace:
+                self.data = image.data
+                self.header = image.data_header
+                self.wcs = image.wcs.wcs
+            else:
+                return image.data, image.wcs.wcs, image.data_header
 
     def mask_galaxy(self, center, amax, amin, pa):
         """
@@ -215,11 +235,19 @@ class Image:
         outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.fits'))
         self.stars.write(outname, overwrite=True)
 
-    def build_startable(self, coords):
+    def build_startable(self, coords, data, wcs):
 
         """
         Refine the position of the stars and build the star table that will be feed to the
         ePSF builder
+
+        Args:
+            coords (list):
+                list of coordinates of the selected stars.
+            data (np.ndarray):
+                data array.
+            wcs (astropy.wcs.WCS):
+                wcs associated to the data array.
 
         Returns:
             astropy.table.Table:
@@ -233,7 +261,7 @@ class Image:
         #recentering the stars. Weirdly fitting a gaussian does not work. For now,
         #I'll try with identifying the max. Will see
         for i, coord in enumerate(coords):
-            zoom = Cutout2D(self.data, coord, 7*u.arcsec, wcs=self.wcs)
+            zoom = Cutout2D(data, coord, 7*u.arcsec, wcs=wcs)
             if not np.isfinite(zoom.data).all():
                 continue
             guess = np.unravel_index(zoom.data.argmax(), zoom.data.shape)
@@ -250,7 +278,7 @@ class Image:
             #     plt.show()
             #     print(fit)
             newcoord = zoom.wcs.pixel_to_world(guess[1], guess[0])
-            newpix = self.wcs.world_to_pixel(newcoord)
+            newpix = wcs.world_to_pixel(newcoord)
             x[i] = newpix[0]
             y[i] = newpix[1]
 
@@ -260,7 +288,7 @@ class Image:
 
         return stars_tbl
 
-    def build_psf(self, center, gmin, gmax, radius=10*u.arcmin, npix=35,
+    def build_psf(self, center, gmin, gmax, radius=10*u.arcmin, npix=35, pixscale=0.2,
                   oversampling=4, save=True, show=True):
         """
         Build the ePSF of the considered image. Extracted from the EPSFBuilder tutorial
@@ -276,6 +304,9 @@ class Image:
                 Radius to search for the stars. Defaults to 10*u.arcmin.
             npix (int, optional):
                 Number of pixels to use to extract the cutouts of the stars. Defaults to 35.
+            pixscale (float, optional):
+                pixelscale to use to resample the data array before computing the ePSF. If None,
+                no resampling is applied. Defaults to 0.2.
             oversampling (int, optional):
                 Oversampling factor for the EPSF builder. Defaults to 4.
             save (bool, optional):
@@ -284,13 +315,22 @@ class Image:
                 Show the output plots. Defaults to True.
         """
 
+        if pixscale is not None:
+            data, wcs, header = self.resample(pixscale=pixscale, inplace=False)
+            self.psfscale = pixscale
+        else:
+            data = self.data
+            wcs = self.wcs
+            header = self.header
+            self.psfscale = np.around(self.wcs.proj_plane_pixel_scales()[0].to(u.arcsec).value, 3)
+
         self.get_gaia_catalog(center, gmin, gmax, radius=radius)
 
         coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
 
         stars_tbl = self.build_startable(coords)
 
-        nddata = NDData(data=self.data)
+        nddata = NDData(data=data)
         stars = extract_stars(nddata, stars_tbl, size=npix)
 
         # removing the local background from the selected stars
@@ -352,6 +392,7 @@ class Image:
         else:
             hdu = fits.PrimaryHDU(new_psf.data / psf_flux)
             self.psf = new_psf.data / psf_flux
+        hdu.header['PSFSCALE'] = self.psfscale
         out = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.fits'))
         hdu.writeto(out, overwrite=True)
 
@@ -383,5 +424,7 @@ class Image:
 
         with fits.open(filename) as hdu:
             psf = hdu[0].data
+            head = hdu[0].header
 
         self.psf = psf
+        self.psfscale = head['PSFSCALE']

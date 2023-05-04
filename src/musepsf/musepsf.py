@@ -137,6 +137,7 @@ class MUSEImage(Image):
 
         assert self.units == reference.units, 'The two images are not in the same units'
         assert reference.psf is not None, 'The reference PSF is missing'
+        assert reference.psfscale == np.around(self.wcs.proj_plane_pixel_scales()[0].to(u.arcsec).value, 3), 'The PSF has been created with a different pixel scale'
 
         # resampling the reference to the MUSE WCS
         reference.resample(header=self.header)
