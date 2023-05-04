@@ -328,7 +328,7 @@ class Image:
 
         coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
 
-        stars_tbl = self.build_startable(coords)
+        stars_tbl = self.build_startable(coords, data, wcs)
 
         nddata = NDData(data=data)
         stars = extract_stars(nddata, stars_tbl, size=npix)
