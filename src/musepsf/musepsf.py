@@ -222,10 +222,15 @@ class MUSEImage(Image):
         elif len(pars) == 2:
             fwhm, alpha = pars[0], pars[1]
 
+        factor = 1 #this is a factor that will be used to return very high numbers if the
+                   #parameters are out of bounds
+
         if fwhm < 0.4 or fwhm > 2:
-            return 1e10
+            fwhm = 0.4
+            factor = 1e10
         if alpha < 1:
-            return 1e10
+            alpha = 2
+            factor = 1e10
 
         # creating model of MUSE PSF
         size = self.convolved.shape[0]
@@ -291,7 +296,7 @@ class MUSEImage(Image):
         # leastsq requires the array of residuals to be minimized
         function = (MUSE_masked-ref_masked)
 
-        return function.ravel()
+        return function.ravel() * factor
 
     def check_flux_calibration(self, reference, bin_size=15, plot=False, save=False, show=True):
         """
