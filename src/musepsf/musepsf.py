@@ -222,6 +222,11 @@ class MUSEImage(Image):
         elif len(pars) == 2:
             fwhm, alpha = pars[0], pars[1]
 
+        if fwhm < 0.4 or fwhm > 2:
+            return 1e10
+        if alpha < 1:
+            return 1e10
+
         # creating model of MUSE PSF
         size = self.convolved.shape[0]
         ker_MUSE = moffat_kernel(fwhm, alpha, scale=self.scale, img_size=size)
