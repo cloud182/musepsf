@@ -9,6 +9,7 @@ from astropy.wcs import WCS
 from astropy.table import Table
 from astropy.stats import sigma_clipped_stats
 from astropy.nddata import NDData, Cutout2D
+from astropy.nddata.utils import NoOverlapError
 from astropy.coordinates import SkyCoord
 from astroquery.gaia import Gaia
 from photutils.psf import extract_stars
@@ -254,14 +255,17 @@ class Image:
                 Astropy table with the x and y coordinates of the selected stars.
         """
 
-        x, y = np.empty(len(coords)), np.empty(len(coords))
+        x, y = [], []
 
         # fitter = fitting.LevMarLSQFitter()
 
         #recentering the stars. Weirdly fitting a gaussian does not work. For now,
         #I'll try with identifying the max. Will see
         for i, coord in enumerate(coords):
-            zoom = Cutout2D(data, coord, 7*u.arcsec, wcs=wcs)
+            try:
+                zoom = Cutout2D(data, coord, 7*u.arcsec, wcs=wcs)
+            except NoOverlapError:
+                continue
             if not np.isfinite(zoom.data).all():
                 continue
             guess = np.unravel_index(zoom.data.argmax(), zoom.data.shape)
@@ -279,8 +283,8 @@ class Image:
             #     print(fit)
             newcoord = zoom.wcs.pixel_to_world(guess[1], guess[0])
             newpix = wcs.world_to_pixel(newcoord)
-            x[i] = newpix[0]
-            y[i] = newpix[1]
+            x.append(newpix[0])
+            y.append(newpix[1])
 
         stars_tbl = Table()
         stars_tbl['x'] = x

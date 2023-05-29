@@ -1,18 +1,13 @@
 import numpy as np
 import astropy.units as u
 import matplotlib.pyplot as plt
-import astropy.visualization as vis
 
-from scipy.optimize import leastsq
 from scipy.odr import ODR, Model, RealData
-from mpl_toolkits.axes_grid1 import make_axes_locatable
-from astropy.convolution import convolve_fft
 from .image import Image
 
 import os
 
-from .utils import plot_images, bin_image, linear_function, locate_stars, \
-    moffat_kernel, apply_mask
+from .utils import plot_images, bin_image, linear_function, run_measure_psf
 
 
 class MUSEImage(Image):
@@ -149,154 +144,21 @@ class MUSEImage(Image):
         # rescaling the flux
         self.check_flux_calibration(reference.data, plot=plot, save=save, show=show)
 
-        self.star_pos, self.starmask = locate_stars(self.data, **kwargs)
+        figname = os.path.join(self.output_dir, self.filename.replace('.fits', '_final.png'))
 
-        self.convolved = convolve_fft(self.data, reference.psf)
-
-        # determining the alpha to use for the fit
-        alpha = kwargs.get('alpha', None)
-        if alpha is None:
-            if self.main_header['HIERARCH ESO TPL ID'] == 'MUSE_wfm-ao_obs_genericoffsetLGS':
-                alpha = 2.3
-                print(f'AO data, using alpha = {alpha}')
-            else:
-                alpha = 2.8
-                print(f'NOAO data, using alpha = {alpha}')
+        if self.main_header['HIERARCH ESO TPL ID'] == 'MUSE_wfm-ao_obs_genericoffsetLGS':
+            alpha = 2.3
         else:
-            print(f'Using Custom alpha = {alpha}')
+            alpha = 2.8
 
-        self.alpha = alpha
-
-        print('Performing the fit')
-        edge = kwargs.get('edge', 10)
-        first_guess = kwargs.get('first_guess', 0.8)
-        if fit_alpha:
-            self.res = leastsq(self.to_minimize, x0=[first_guess, self.alpha],
-                               args=(reference.data, False, False, False, None, edge),
-                               maxfev=600, xtol=1e-9, full_output=True)
-        else:
-            self.res = leastsq(self.to_minimize, x0=[first_guess],
-                               args=(reference.data, False, False, False, None, edge),
-                               maxfev=600, xtol=1e-9, full_output=True)
-
+        self.res, self.star_pos, self.starmask = run_measure_psf(self.data, reference.data,
+                                                                 reference.psf, figname,
+                                                                 fit_alpha=fit_alpha,
+                                                                 alpha=alpha, fwhm0=0.8,
+                                                                 scale=self.scale,
+                                                                 plot=plot, save=save)
         self.best_fit = self.res[0]
 
-        print('Fit completed')
-        print(f'Measured FWHM = {self.best_fit[0]:0.2f}')
-        if fit_alpha:
-            print(f'Measured alpha = {self.best_fit[1]:0.2f}')
-
-        figname = os.path.join(self.output_dir, self.filename.replace('.fits', '_final.png'))
-        function = self.to_minimize(self.best_fit, reference.data, plot=plot, save=save, show=show,
-                                    figname=figname, edge=edge)
-
-    def to_minimize(self, pars, reference, plot=False, save=False, show=False,
-                    figname=None, edge=10):
-        """
-        Function to be minimize to measure the PSF properties
-
-        Args:
-            pars (list):
-                Initial guess for the fitted parameters.
-            reference (np.ndarray):
-                reference image
-            plot (bool, optional):
-                If True, some diagnostic plots will be produced. Defaults to False.
-            save (bool, optional):
-                If True, the plots will be saved. Defaults to False.
-            show (bool, optional):
-                If True, the plots will be shown. Defaults to True.
-            figname (str, optional):
-                Name of the figure file. Defaults to None.
-            edge (int, optional):
-                number of pixels at the edge of the image to be ignored during minimization.
-                Defaults to 10.
-
-        Returns:
-            np.ndarray: array for the minimization
-        """
-
-        if len(pars) == 1:
-            fwhm = pars[0]
-            alpha = self.alpha
-        elif len(pars) == 2:
-            fwhm, alpha = pars[0], pars[1]
-
-        factor = 1 #this is a factor that will be used to return very high numbers if the
-                   #parameters are out of bounds
-
-        if fwhm < 0.4 or fwhm > 2:
-            fwhm = 0.4
-            factor = 1e10
-        if alpha < 1:
-            alpha = 2
-            factor = 1e10
-
-        # creating model of MUSE PSF
-        size = self.convolved.shape[0]
-        ker_MUSE = moffat_kernel(fwhm, alpha, scale=self.scale, img_size=size)
-
-        # convolving WFI image for the model of MUSE PSF
-        reference_conv = convolve_fft(reference, ker_MUSE)
-
-        MUSE_masked, ref_masked = apply_mask(self.convolved, reference_conv, self.starmask,
-                                             edge=edge)
-
-        # plotting the results of the convolution if required
-        if plot:
-            fig = plt.figure(figsize=(16, 6))
-            gs = fig.add_gridspec(1, 3)
-            ax1 = fig.add_subplot(gs[0, 0])
-            ax2 = fig.add_subplot(gs[0, 1])
-            ax3 = fig.add_subplot(gs[0, 2])
-            ax1.set_title('MUSE')
-            ax2.set_title('WFI')
-            ax3.set_title('Diff')
-
-            # MUSE FFT
-
-            # normalization for a better plot
-            interval = vis.PercentileInterval(99.9)
-            vmin, vmax = interval.get_limits(MUSE_masked)
-            norm = vis.ImageNormalize(vmin=vmin, vmax=vmax,
-                                    stretch=vis.LogStretch(1000))
-
-            # MUSE image
-            img1 = ax1.imshow(MUSE_masked, norm=norm, origin='lower')
-            divider1 = make_axes_locatable(ax1)
-            cax1 = divider1.append_axes('right', size='5%', pad=0.05)
-
-            # WFI image
-            img2 = ax2.imshow(ref_masked, norm=norm, origin='lower')
-            divider2 = make_axes_locatable(ax2)
-            cax2 = divider2.append_axes('right', size='5%', pad=0.05)
-
-            # Difference image
-            img3 = ax3.matshow(MUSE_masked/ref_masked, vmin=0.8,
-                            vmax=1.2, origin='lower')
-            divider3 = make_axes_locatable(ax3)
-            cax3 = divider3.append_axes('right', size='5%', pad=0.05)
-
-            axes = [ax1, ax2, ax3]
-
-            for ax in axes:
-                ax.axes.get_yaxis().set_visible(False)
-                ax.axes.get_xaxis().set_visible(True)
-
-            fig.colorbar(img1, cax=cax1)
-            fig.colorbar(img2, cax=cax2)
-            fig.colorbar(img3, cax=cax3)
-            if save:
-                plt.savefig(figname, dpi=150)
-            if show:
-                plt.show()
-            else:
-                plt.close()
-
-        # leastsq requires the array of residuals to be minimized
-        function = (MUSE_masked-ref_masked)
-
-        return function.ravel() * factor
 
     def check_flux_calibration(self, reference, bin_size=15, plot=False, save=False, show=True):
         """
