@@ -9,7 +9,7 @@ an adapted and simplified version of the procedure provided in [Bacon et al. 201
 
 Inatallation:
 
-Clone this repository using `git clone https://github.com/cloud182/musepsf.git` and installi it
+Clone this repository using `git clone https://github.com/cloud182/musepsf.git` and install it
 locally via `python -m pip install -e .`.
 
 To see an exaple of how to use the package to measure the PSF of a MUSE image, please check the
