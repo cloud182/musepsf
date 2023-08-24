@@ -151,12 +151,14 @@ class MUSEImage(Image):
         else:
             alpha = 2.8
 
+        edge = kwargs.pop('edge', 50)
         self.res, self.star_pos, self.starmask = run_measure_psf(self.data, reference.data,
                                                                  reference.psf, figname,
                                                                  fit_alpha=fit_alpha,
                                                                  alpha=alpha, fwhm0=0.8,
                                                                  scale=self.scale,
-                                                                 plot=plot, save=save)
+                                                                 plot=plot, save=save,
+                                                                 edge=edge)
         self.best_fit = self.res[0]
 
 
