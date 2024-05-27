@@ -210,10 +210,12 @@ class MUSEImage(Image):
         MUSE_median, MUSE_std = bin_image(self.data, bin_size)
         reference_median, reference_std = bin_image(reference, bin_size)
 
-        #removing nans
+        #removing nans and 0s
         index1 = np.isnan(MUSE_median)
         index2 = np.isnan(reference_median)
-        index = np.any((index1, index2), axis=0)
+        index3 = MUSE_median == 0
+        index4 = reference_median == 0
+        index = np.any((index1, index2, index3, index4), axis=0)
 
         MUSE_median = MUSE_median[~index]
         MUSE_std = MUSE_std[~index]
