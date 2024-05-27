@@ -10,6 +10,7 @@ from astroquery.gaia import Gaia
 from photutils.detection import DAOStarFinder
 from astropy.convolution import convolve_fft
 from scipy.optimize import leastsq
+from numpy.fft import fftfreq
 
 # configure astroquery gaia
 Gaia.ROW_LIMIT = 10000
@@ -236,7 +237,7 @@ def apply_mask(image1, image2, starmask, edge=5):
 
 
 def to_minimize(pars, convolved, reference, starmask, edge=50, alpha0=None, fwhm_bound=[0.4, 2],
-                alpha_bound=[1, 10], scale=0.2):
+                alpha_bound=[1, 10], dd_bound=[-2, 2], scale=0.2):
     """
     Compute the function to be minimize to measure the PSF properties
 
@@ -267,13 +268,17 @@ def to_minimize(pars, convolved, reference, starmask, edge=50, alpha0=None, fwhm
             Function needed for the minimization
     """
 
-
-
     if len(pars) == 1:
         fwhm = pars[0]
+        alpha, dx, dy = alpha0, 0, 0
+    if len(pars) == 2:
+        fwhm, alpha = pars
+        dx, dy = 0, 0
+    elif len(pars) == 3:
+        fwhm, dx, dy = pars
         alpha = alpha0
-    elif len(pars) == 2:
-        fwhm, alpha = pars[0], pars[1]
+    elif len(pars) == 4:
+        fwhm, dx, dy, alpha = pars
 
     factor = 1 #this is a factor that will be used to return very high numbers if the
                 #parameters are out of bounds
@@ -286,13 +291,24 @@ def to_minimize(pars, convolved, reference, starmask, edge=50, alpha0=None, fwhm
         if alpha < alpha_bound[0] or alpha > alpha_bound[1]:
             alpha = 2
             factor = 1e10
+    if dd_bound is not None:
+         if dx < dd_bound[0] or dx > dd_bound[1]:
+            dx = 0
+            factor = 1e10
+         if dy < dd_bound[0] or dy > dd_bound[1]:
+            dy = 0
+            factor = 1e10
+
 
     # creating model of MUSE PSF
     size = convolved.shape[0]
     ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=size)
 
     # convolving WFI image for the model of MUSE PSF
-    reference_conv = convolve_fft(reference, ker_MUSE)
+    reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
+    # import sys; sys.exit()
+
+    reference_conv = apply_offset_fourier(reference_conv, reference.shape, dx, dy)
 
     MUSE_masked, ref_masked = apply_mask(convolved, reference_conv, starmask,
                                             edge=edge)
@@ -301,6 +317,27 @@ def to_minimize(pars, convolved, reference, starmask, edge=50, alpha0=None, fwhm
     function = (MUSE_masked-ref_masked)
 
     return function.ravel() * factor
+
+def apply_offset_fourier(convolved, original_shape, dx, dy):
+
+
+    fx = fftfreq(convolved.shape[1])
+    fy = fftfreq(convolved.shape[0])
+
+    fxx, fyy = np.meshgrid(fx, fy)
+    ff = fyy*dy+fxx*dx
+
+    convolved *= np.exp(-2j*np.pi*ff)
+
+    arrayslices = []
+    for dimension_conv, dimension in zip(convolved.shape, original_shape):
+        center = dimension_conv - (dimension_conv + 1) // 2
+        arrayslices += [center - dimension // 2, center + (dimension + 1) // 2]
+
+    convolved = np.fft.ifftn(convolved)
+
+    return convolved[arrayslices[0]: arrayslices[1], arrayslices[2]: arrayslices[3]].real
+
 
 
 def plot_results(pars, convolved, reference, starmask, figname, save=False, show=False,
@@ -335,16 +372,23 @@ def plot_results(pars, convolved, reference, starmask, figname, save=False, show
 
     if len(pars) == 1:
         fwhm = pars[0]
+        alpha, dx, dy = alpha0, 0, 0
+    if len(pars) == 2:
+        fwhm, alpha = pars
+        dx, dy = 0, 0
+    elif len(pars) == 3:
+        fwhm, dx, dy = pars
         alpha = alpha0
-    elif len(pars) == 2:
-        fwhm, alpha = pars[0], pars[1]
+    elif len(pars) == 4:
+        fwhm, dx, dy, alpha = pars
 
     # creating model of MUSE PSF
     size = convolved.shape[0]
     ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=size)
 
     # convolving WFI image for the model of MUSE PSF
-    reference_conv = convolve_fft(reference, ker_MUSE)
+    reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
+    reference_conv = apply_offset_fourier(reference_conv, reference.shape, dx, dy)
 
     MUSE_masked, ref_masked = apply_mask(convolved, reference_conv, starmask,
                                          edge=edge)
@@ -399,8 +443,9 @@ def plot_results(pars, convolved, reference, starmask, figname, save=False, show
         plt.close()
 
 
-def run_measure_psf(data, reference, psf, figname, alpha=2.8, edge=50, fwhm0=0.8,
-                    fit_alpha=False, plot=False, save=False, show=False, scale=0.2, **kwargs):
+def run_measure_psf(data, reference, psf, figname, alpha=2.8, edge=50, fwhm0=0.8, dx0=0, dy0=0,
+                    fit_alpha=False, plot=False, save=False, show=False, scale=0.2,
+                    offset=False, **kwargs):
     """
     Functions that performs the fit of the PSF.
 
@@ -450,31 +495,49 @@ def run_measure_psf(data, reference, psf, figname, alpha=2.8, edge=50, fwhm0=0.8
 
     print('Performing the fit')
 
-    fwhm_bound = kwargs.get('fwhm_bound', [0.4, 2])
+    fwhm_bound = kwargs.get('fwhm_bound', [0.2, 2])
     alpha_bound = kwargs.get('alpha_bound', [1, 10])
-
+    dd_bound = kwargs.get('dd_bound', [-2, 2])
     # it is possible to fit the alpha parameter or to assume a fixed value
-    if fit_alpha:
-        res = leastsq(to_minimize, x0=[fwhm0, alpha],
-                      #convolved, reference, starmask, edge, alpha0, fwhm_bound,
-                      # alpha_bound, scale
-                      args=(convolved, reference, starmask, edge, alpha, fwhm_bound,
-                            alpha_bound, scale),
-                      maxfev=600, xtol=1e-9, full_output=True)
+    if offset:
+        if fit_alpha:
+            res = leastsq(to_minimize, x0=[fwhm0, dx0, dy0, alpha],
+                        #convolved, reference, starmask, edge, alpha0, fwhm_bound,
+                        # alpha_bound, scale
+                        args=(convolved, reference, starmask, edge, alpha, fwhm_bound,
+                                alpha_bound, dd_bound, scale),
+                        maxfev=600, xtol=1e-9, full_output=True)
+        else:
+            res = leastsq(to_minimize, x0=[fwhm0, dx0, dy0],
+                        #convolved, reference, starmask, edge, alpha0, fwhm_bound,
+                        # alpha_bound, scale
+                        args=(convolved, reference, starmask, edge, alpha, fwhm_bound,
+                                alpha_bound, dd_bound, scale),
+                        maxfev=600, xtol=1e-9, full_output=True)
     else:
-        res = leastsq(to_minimize, x0=[fwhm0],
-                      #convolved, reference, starmask, edge, alpha0, fwhm_bound,
-                      # alpha_bound, scale
-                      args=(convolved, reference, starmask, edge, alpha, fwhm_bound,
-                            alpha_bound, scale),
-                      maxfev=600, xtol=1e-9, full_output=True)
+        if fit_alpha:
+            res = leastsq(to_minimize, x0=[fwhm0, alpha],
+                        #convolved, reference, starmask, edge, alpha0, fwhm_bound,
+                        # alpha_bound, scale
+                        args=(convolved, reference, starmask, edge, alpha, fwhm_bound,
+                                alpha_bound, dd_bound, scale),
+                        maxfev=600, xtol=1e-9, full_output=True)
+        else:
+            res = leastsq(to_minimize, x0=[fwhm0],
+                        #convolved, reference, starmask, edge, alpha0, fwhm_bound,
+                        # alpha_bound, scale
+                        args=(convolved, reference, starmask, edge, alpha, fwhm_bound,
+                                alpha_bound, dd_bound, scale),
+                        maxfev=600, xtol=1e-9, full_output=True)
 
     best_fit = res[0]
 
     print('Fit completed')
     print(f'Measured FWHM = {best_fit[0]:0.2f}')
+    if offset:
+        print(f'Measured offset x:{best_fit[1]:0.2f} y:{best_fit[2]:0.2f}')
     if fit_alpha:
-        print(f'Measured alpha = {best_fit[1]:0.2f}')
+        print(f'Measured alpha = {best_fit[-1]:0.2f}')
 
     if plot:
         plot_results(best_fit, convolved, reference, starmask, save=save, show=show,

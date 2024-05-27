@@ -1,6 +1,10 @@
 import numpy as np
 import astropy.units as u
 import matplotlib.pyplot as plt
+import spacepylot.alignment as spalign
+import spacepylot.plotting as pl
+import spacepylot.alignment_utilities as alutils
+
 
 from scipy.odr import ODR, Model, RealData
 from .image import Image
@@ -109,8 +113,8 @@ class MUSEImage(Image):
         self.scale = self.wcs.proj_plane_pixel_scales()[0].to_value(u.arcsec)
 
 
-    def measure_psf(self, reference: Image, fit_alpha=False, plot=False, save=False, show=True,
-                    **kwargs):
+    def measure_psf(self, reference: Image, fit_alpha=False, plot=False, align=False, save=False,
+                    show=True, offset=False, **kwargs):
         """
         Measure the PSF of the image by using a cross-convolution technique to compare the
         MUSE image to a reference image with known PSF.
@@ -124,6 +128,8 @@ class MUSEImage(Image):
                 Defaults to False.
             plot (bool, optional):
                 If True, several diagnostic plots will be produced. Defaults to False.
+            align (bool, optional):
+                If True, spacepylot will be used to refine the alignment of the images.
             save (bool, optional):
                 If True, the plots will be saved. Defaults to False.
             show (bool, optional):
@@ -144,6 +150,24 @@ class MUSEImage(Image):
         # rescaling the flux
         self.check_flux_calibration(reference.data, plot=plot, save=save, show=show)
 
+        # realign with spacepylot
+        if align:
+            print('Align images with spacepylot')
+            op = spalign.AlignOpticalFlow(self.data, reference.data)
+            op.get_iterate_translation_rotation(5)
+            print(op.translation)
+            print(op.rotation_deg)
+            op_plot = pl.AlignmentPlotting.from_align_object(op)
+            op_plot.before_after()
+            figname = os.path.join(self.output_dir, self.filename.replace('.fits', '_spacepylot.png'))
+            plt.savefig(figname, dpi=200)
+            rotated = alutils.rotate_image(self.data, op.rotation_deg)
+            before = self.data.copy()
+            self.data = alutils.translate_image(rotated, op.translation)
+            plt.imshow(before-self.data)
+            plt.savefig(figname.replace('_spacepylot.png', '_test.png'))
+
+
         figname = os.path.join(self.output_dir, self.filename.replace('.fits', '_final.png'))
 
         if self.main_header['HIERARCH ESO TPL ID'] == 'MUSE_wfm-ao_obs_genericoffsetLGS':
@@ -152,13 +176,16 @@ class MUSEImage(Image):
             alpha = 2.8
 
         edge = kwargs.pop('edge', 50)
+        dx0 = kwargs.pop('dx0', 0)
+        dy0 = kwargs.pop('dy0', 0)
         self.res, self.star_pos, self.starmask = run_measure_psf(self.data, reference.data,
                                                                  reference.psf, figname,
                                                                  fit_alpha=fit_alpha,
                                                                  alpha=alpha, fwhm0=0.8,
+                                                                 offset=offset,
                                                                  scale=self.scale,
                                                                  plot=plot, save=save,
-                                                                 edge=edge)
+                                                                 edge=edge, dx0=dx0, dy0=dy0)
         self.best_fit = self.res[0]
 
 

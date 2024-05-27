@@ -8,12 +8,12 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.9,<3.12"
-astropy = "^5.2"
+astropy = ">=5.2"
 numpy = "^1.21"
-scipy = "^1.9c"
+scipy = ">=1.9c"
 astroquery = "^0.4.6"
 photutils = "^1.6.0"
-reproject = "^0.10.0"
+reproject = ">=0.10.0"
 regions = "^0.7"
 matplotlib = "^3.7.1"
 
