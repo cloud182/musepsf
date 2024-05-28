@@ -10,7 +10,13 @@ from astroquery.gaia import Gaia
 from photutils.detection import DAOStarFinder
 from astropy.convolution import convolve_fft
 from scipy.optimize import leastsq
-from numpy.fft import fftfreq
+from numpy.fft import fftfreq, ifftn
+
+
+from dynesty import DynamicNestedSampler
+from dynesty import utils as dyfunc
+from dynesty import plotting as dyplot
+from dynesty.pool import Pool
 
 # configure astroquery gaia
 Gaia.ROW_LIMIT = 10000
@@ -199,7 +205,7 @@ def moffat_kernel(fwhm, alpha, scale=0.238, img_size=241):
     return moffat_k
 
 
-def apply_mask(image1, image2, starmask, edge=5):
+def apply_mask(image, starmask, edge=5):
     """
     Apply the same starmask to 2 images of the same size
 
@@ -220,29 +226,26 @@ def apply_mask(image1, image2, starmask, edge=5):
             Masked and trimmed version of image2
         """
 
-    masked1 = np.ma.masked_array(data=image1)
-    masked2 = np.ma.masked_array(data=image2)
+    masked = np.ma.masked_array(data=image)
 
     if starmask is not None:
-        assert starmask.shape == image1.shape, 'Mask and image1 are of different shape'
-        assert starmask.shape == image2.shape, 'Mask and image2 are of different shape'
-        masked1.mask=starmask
-        masked2.mask=starmask
+        assert starmask.shape == image.shape, 'Mask and image1 are of different shape'
+        masked.mask=starmask
 
 
     if edge != 0:
-        return masked1[edge:-edge, edge:-edge], masked2[edge:-edge, edge:-edge]
+        return masked[edge:-edge, edge:-edge]
     else:
-        return masked1, masked2
+        return masked
 
 
-def to_minimize(pars, convolved, reference, starmask, edge=50, alpha0=None, fwhm_bound=[0.4, 2],
-                alpha_bound=[1, 10], dd_bound=[-2, 2], scale=0.2):
+def lnlike(pars, convolved, reference, starmask, fxx, fyy, arrayslices, edge=50, alpha0=None, scale=0.2):
+
     """
     Compute the function to be minimize to measure the PSF properties
 
     Args:
-         pars (list):
+        pars (list):
             Initial guess for the fitted parameters.
         convolved (np.ndarray):
             array for which the PSF will be measured, convolved for the model of the PSF of the
@@ -256,10 +259,6 @@ def to_minimize(pars, convolved, reference, starmask, edge=50, alpha0=None, fwhm
             Defaults to 50.
         alpha0 (float, optional):
             Value of alpha if not among the fittted parameters. Defaults to None.
-        fwhm_bound (list, optional):
-            minimum and maximum limits that the FWHM parameter can assume. Defaults to [0.4, 2].
-        alpha_bound (list, optional):
-            minimum and maximum limits that the alpha parameter can assume.. Defaults to [1, 10].
         scale (float, optional):
             pixel scale of the images. Defaults to 0.2.
 
@@ -268,79 +267,88 @@ def to_minimize(pars, convolved, reference, starmask, edge=50, alpha0=None, fwhm
             Function needed for the minimization
     """
 
-    if len(pars) == 1:
+    if len(pars) == 2:
         fwhm = pars[0]
         alpha, dx, dy = alpha0, 0, 0
-    if len(pars) == 2:
-        fwhm, alpha = pars
+    if len(pars) == 3:
+        fwhm, alpha = pars[:2]
         dx, dy = 0, 0
-    elif len(pars) == 3:
-        fwhm, dx, dy = pars
-        alpha = alpha0
     elif len(pars) == 4:
-        fwhm, dx, dy, alpha = pars
+        fwhm, dx, dy = pars[:3]
+        alpha = alpha0
+    elif len(pars) == 5:
+        fwhm, dx, dy, alpha = pars[:4]
 
-    factor = 1 #this is a factor that will be used to return very high numbers if the
-                #parameters are out of bounds
+    sigma = pars[-1]
 
-    if fwhm_bound is not None:
-        if fwhm < fwhm_bound[0] or fwhm > fwhm_bound[1]:
-            fwhm = 0.4
-            factor = 1e10
-    if alpha_bound is not None:
-        if alpha < alpha_bound[0] or alpha > alpha_bound[1]:
-            alpha = 2
-            factor = 1e10
-    if dd_bound is not None:
-         if dx < dd_bound[0] or dx > dd_bound[1]:
-            dx = 0
-            factor = 1e10
-         if dy < dd_bound[0] or dy > dd_bound[1]:
-            dy = 0
-            factor = 1e10
-
+    if sigma <= 0:
+        return -np.inf  # Log likelihood is -inf if sigma is not positive
 
     # creating model of MUSE PSF
-    size = convolved.shape[0]
-    ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=size)
+    ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=50)
 
     # convolving WFI image for the model of MUSE PSF
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
     # import sys; sys.exit()
 
-    reference_conv = apply_offset_fourier(reference_conv, reference.shape, dx, dy)
+    reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
 
-    MUSE_masked, ref_masked = apply_mask(convolved, reference_conv, starmask,
-                                            edge=edge)
+    ref_masked = apply_mask(reference_conv, starmask, edge=edge) #muse is already masked
 
     # leastsq requires the array of residuals to be minimized
-    function = (MUSE_masked-ref_masked)
+    function = (convolved-ref_masked)
 
-    return function.ravel() * factor
+    return -0.5 * function.size * np.log(2 * np.pi * sigma**2) - ((function**2) / (2 * sigma**2)).sum()
 
-def apply_offset_fourier(convolved, original_shape, dx, dy):
+    #PRIOR
+def ptform(params, fwhm_range=[0, 2], alpha_range=[1.5, 3], offset_range=[-1, 1]):
+    """
+    Prior transform for fitting
 
+    Args:
+        params (_type_): _description_
+        fwhm_range (_type_): _description_
+        alpha_range (_type_): _description_
+        offset_range (_type_): _description_
 
-    fx = fftfreq(convolved.shape[1])
-    fy = fftfreq(convolved.shape[0])
+    Returns:
+        _type_: _description_
+    """
 
-    fxx, fyy = np.meshgrid(fx, fy)
+    x = np.zeros_like(params)
+
+    if len(params) == 2:
+        x[0] = (fwhm_range[1] - fwhm_range[0]) * params[0] + fwhm_range[0]
+    if len(params) == 3:
+        x[0] = (fwhm_range[1] - fwhm_range[0]) * params[0] + fwhm_range[0]
+        x[1] = (alpha_range[1] - alpha_range[0]) * params[1] + alpha_range[0]
+    elif len(params) == 4:
+        x[0] = (fwhm_range[1] - fwhm_range[0]) * params[0] + fwhm_range[0]
+        x[1] = (offset_range[1] - offset_range[0]) * params[1] + offset_range[0]
+        x[2] = (offset_range[1] - offset_range[0]) * params[2] + offset_range[0]
+    elif len(params) == 5:
+        x[0] = (fwhm_range[1] - fwhm_range[0]) * params[0] + fwhm_range[0]
+        x[1] = (offset_range[1] - offset_range[0]) * params[1] + offset_range[0]
+        x[2] = (offset_range[1] - offset_range[0]) * params[2] + offset_range[0]
+        x[3] = (alpha_range[1] - alpha_range[0]) * params[3] + alpha_range[0]
+
+    x[-1] = params[-1] # uniform from 0 to 2
+
+    return x
+
+def apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices):
+
     ff = fyy*dy+fxx*dx
 
-    convolved *= np.exp(-2j*np.pi*ff)
+    reference_conv *= np.exp(-2j*np.pi*ff)
 
-    arrayslices = []
-    for dimension_conv, dimension in zip(convolved.shape, original_shape):
-        center = dimension_conv - (dimension_conv + 1) // 2
-        arrayslices += [center - dimension // 2, center + (dimension + 1) // 2]
+    reference_conv = ifftn(reference_conv)
 
-    convolved = np.fft.ifftn(convolved)
-
-    return convolved[arrayslices[0]: arrayslices[1], arrayslices[2]: arrayslices[3]].real
+    return reference_conv[arrayslices[0]: arrayslices[1], arrayslices[2]: arrayslices[3]].real
 
 
 
-def plot_results(pars, convolved, reference, starmask, figname, save=False, show=False,
+def plot_results(pars, convolved, reference, starmask, fxx, fyy, arrayslices, figname, save=False, show=False,
                  edge=50, alpha0=None, scale=0.2):
     """
     Functions that plot the final results of the PSF fitting
@@ -370,28 +378,26 @@ def plot_results(pars, convolved, reference, starmask, figname, save=False, show
             pixel scale of the images. Defaults to 0.2.
     """
 
-    if len(pars) == 1:
+    if len(pars) == 2:
         fwhm = pars[0]
         alpha, dx, dy = alpha0, 0, 0
-    if len(pars) == 2:
-        fwhm, alpha = pars
+    if len(pars) == 3:
+        fwhm, alpha = pars[:2]
         dx, dy = 0, 0
-    elif len(pars) == 3:
-        fwhm, dx, dy = pars
-        alpha = alpha0
     elif len(pars) == 4:
-        fwhm, dx, dy, alpha = pars
+        fwhm, dx, dy = pars[:3]
+        alpha = alpha0
+    elif len(pars) == 5:
+        fwhm, dx, dy, alpha = pars[:4]
 
     # creating model of MUSE PSF
-    size = convolved.shape[0]
-    ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=size)
+    ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=50)
 
     # convolving WFI image for the model of MUSE PSF
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
-    reference_conv = apply_offset_fourier(reference_conv, reference.shape, dx, dy)
+    reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
 
-    MUSE_masked, ref_masked = apply_mask(convolved, reference_conv, starmask,
-                                         edge=edge)
+    ref_masked = apply_mask(reference_conv, starmask, edge=edge)
 
     # plotting the results of the convolution
 
@@ -406,12 +412,12 @@ def plot_results(pars, convolved, reference, starmask, figname, save=False, show
 
     # normalization for a better plot
     interval = vis.PercentileInterval(99.9)
-    vmin, vmax = interval.get_limits(MUSE_masked)
+    vmin, vmax = interval.get_limits(convolved)
     norm = vis.ImageNormalize(vmin=vmin, vmax=vmax,
                             stretch=vis.LogStretch(1000))
 
     # MUSE image
-    img1 = ax1.imshow(MUSE_masked, norm=norm, origin='lower')
+    img1 = ax1.imshow(convolved, norm=norm, origin='lower')
     divider1 = make_axes_locatable(ax1)
     cax1 = divider1.append_axes('right', size='5%', pad=0.05)
 
@@ -421,7 +427,7 @@ def plot_results(pars, convolved, reference, starmask, figname, save=False, show
     cax2 = divider2.append_axes('right', size='5%', pad=0.05)
 
     # Difference image
-    img3 = ax3.matshow(MUSE_masked/ref_masked, vmin=0.8,
+    img3 = ax3.matshow(convolved/ref_masked, vmin=0.8,
                     vmax=1.2, origin='lower')
     divider3 = make_axes_locatable(ax3)
     cax3 = divider3.append_axes('right', size='5%', pad=0.05)
@@ -443,7 +449,7 @@ def plot_results(pars, convolved, reference, starmask, figname, save=False, show
         plt.close()
 
 
-def run_measure_psf(data, reference, psf, figname, alpha=2.8, edge=50, fwhm0=0.8, dx0=0, dy0=0,
+def run_measure_psf(data, reference, psf, figname, alpha=2.8, edge=50,
                     fit_alpha=False, plot=False, save=False, show=False, scale=0.2,
                     offset=False, **kwargs):
     """
@@ -489,7 +495,27 @@ def run_measure_psf(data, reference, psf, figname, alpha=2.8, edge=50, fwhm0=0.8
 
     star_pos, starmask = locate_stars(data, **kwargs)
 
+    # computing the fxx, fyy and arrayslices to make fitting faster
+    # creating model of MUSE PSF
+    ker_MUSE = moffat_kernel(1, 2.8, scale=scale, img_size=50)
+    # convolving WFI image for the model of MUSE PSF
+    reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
+
+    fx = fftfreq(reference_conv.shape[1])
+    fy = fftfreq(reference_conv.shape[0])
+
+    fxx, fyy = np.meshgrid(fx, fy)
+
+    arrayslices = []
+    for dimension_conv, dimension in zip(reference_conv.shape, reference.shape):
+        center = dimension_conv - (dimension_conv + 1) // 2
+        arrayslices += [center - dimension // 2, center + (dimension + 1) // 2]
+
+    # end preparation for loglike computation
+
+
     convolved = convolve_fft(data, psf)
+    convolved = apply_mask(convolved, starmask, edge=edge)
 
     print(f'Using alpha = {alpha}')
 
@@ -498,49 +524,87 @@ def run_measure_psf(data, reference, psf, figname, alpha=2.8, edge=50, fwhm0=0.8
     fwhm_bound = kwargs.get('fwhm_bound', [0.2, 2])
     alpha_bound = kwargs.get('alpha_bound', [1, 10])
     dd_bound = kwargs.get('dd_bound', [-2, 2])
+    parallelize = kwargs.get('parallelize', False)
+    nproc = kwargs.get('nproc', 8)
+
+    logl_kwargs = dict(convolved=convolved,
+                       reference=reference,
+                       starmask=starmask,
+                       fxx=fxx,
+                       fyy=fyy,
+                       arrayslices=arrayslices,
+                       edge=edge,
+                       alpha0=alpha,
+                       scale=scale)
+    ptform_args = [fwhm_bound, alpha_bound, dd_bound]
+
     # it is possible to fit the alpha parameter or to assume a fixed value
-    if offset:
-        if fit_alpha:
-            res = leastsq(to_minimize, x0=[fwhm0, dx0, dy0, alpha],
-                        #convolved, reference, starmask, edge, alpha0, fwhm_bound,
-                        # alpha_bound, scale
-                        args=(convolved, reference, starmask, edge, alpha, fwhm_bound,
-                                alpha_bound, dd_bound, scale),
-                        maxfev=600, xtol=1e-9, full_output=True)
-        else:
-            res = leastsq(to_minimize, x0=[fwhm0, dx0, dy0],
-                        #convolved, reference, starmask, edge, alpha0, fwhm_bound,
-                        # alpha_bound, scale
-                        args=(convolved, reference, starmask, edge, alpha, fwhm_bound,
-                                alpha_bound, dd_bound, scale),
-                        maxfev=600, xtol=1e-9, full_output=True)
+    if offset and fit_alpha:
+        ndim = 5
+        labels=["fwhm", "dx", "dy", "alpha", "sigma"]
+    elif offset and not fit_alpha:
+        ndim = 4
+        labels=["fwhm", "dx", "dy", "sigma"]
+    elif not offset and fit_alpha:
+        ndim = 3
+        labels=["fwhm", "alpha", "sigma"]
+    elif not offset and not fit_alpha:
+        ndim = 2
+        labels=["fwhm", "sigma"]
+
+    if parallelize:
+        print('Parallelizing computation')
+        with Pool(nproc, lnlike, ptform, logl_kwargs=logl_kwargs, ptform_args=ptform_args) as pool:
+            sampler = DynamicNestedSampler(pool.loglike, pool.prior_transform, ndim=ndim,
+                                           pool=pool, use_pool={'prior_transform': True,
+                                                                'loglikelihood': True,
+                                                                'propose_point':True,
+                                                                'update_bound':True})
+            sampler.run_nested(print_progress=True, dlogz_init=0.01,
+                               nlive_init=250, nlive_batch=50, checkpoint_every=120,
+                               maxiter_init=20000, maxiter_batch=500, maxbatch=10)
     else:
-        if fit_alpha:
-            res = leastsq(to_minimize, x0=[fwhm0, alpha],
-                        #convolved, reference, starmask, edge, alpha0, fwhm_bound,
-                        # alpha_bound, scale
-                        args=(convolved, reference, starmask, edge, alpha, fwhm_bound,
-                                alpha_bound, dd_bound, scale),
-                        maxfev=600, xtol=1e-9, full_output=True)
-        else:
-            res = leastsq(to_minimize, x0=[fwhm0],
-                        #convolved, reference, starmask, edge, alpha0, fwhm_bound,
-                        # alpha_bound, scale
-                        args=(convolved, reference, starmask, edge, alpha, fwhm_bound,
-                                alpha_bound, dd_bound, scale),
-                        maxfev=600, xtol=1e-9, full_output=True)
+        sampler = DynamicNestedSampler(lnlike, ptform, ndim=ndim, nlive=250,
+                                       logl_kwargs=logl_kwargs, ptform_args=ptform_args)
+        sampler.run_nested(print_progress=True, dlogz_init=0.01,
+                           nlive_init=250, nlive_batch=50, checkpoint_every=120,
+                           maxiter_init=20000, maxiter_batch=500, maxbatch=10)
 
-    best_fit = res[0]
-
-    print('Fit completed')
-    print(f'Measured FWHM = {best_fit[0]:0.2f}')
-    if offset:
-        print(f'Measured offset x:{best_fit[1]:0.2f} y:{best_fit[2]:0.2f}')
-    if fit_alpha:
-        print(f'Measured alpha = {best_fit[-1]:0.2f}')
+    results = sampler.results
+    weights = np.exp(results.logwt - results.logz[-1])
+    samples = results.samples
+    quantiles = [dyfunc.quantile(samps, [0.16, 0.5, 0.84], weights=weights)
+                    for samps in samples.T]
 
     if plot:
-        plot_results(best_fit, convolved, reference, starmask, save=save, show=show,
+        fig = dyplot.cornerplot(results, \
+                labels=labels,
+                show_titles=True,
+                title_kwargs={"fontsize": 10},
+                label_kwargs={"fontsize": 14},
+                # data_kwargs={"ms": 0.6},
+                quantiles=[0.16, 0.5, 0.84])
+        if save:
+            plt.savefig(figname.replace('_final.png', '_corner.png'), dpi=200)
+            plt.close()
+        else:
+            plt.show()
+
+    best_fit = list(map(lambda v: (v[1], v[2]-v[1], v[1]-v[0]), quantiles))
+
+    print('Fit completed')
+    print(f'Measured FWHM = {best_fit[0][0]:0.2f} +{best_fit[0][1]:0.2f} -{best_fit[0][2]:0.2f}')
+    if offset:
+        print(f'Measured offset x:{best_fit[1][0]:0.2f} +{best_fit[1][1]:0.2f} -{best_fit[1][2]:0.2f}')
+        print(f'Measured offset y:{best_fit[2][0]:0.2f} +{best_fit[2][1]:0.2f} -{best_fit[2][2]:0.2f}')
+    if fit_alpha:
+        print(f'Measured alpha = {best_fit[-2][0]:0.2f} +{best_fit[-2][1]:0.2f} -{best_fit[-2][2]:0.2f}')
+    print(f'Measured sigma = {best_fit[-1][0]:0.2f} +{best_fit[-1][1]:0.2f} -{best_fit[-1][2]:0.2f}')
+
+    if plot:
+
+        params = [item[0] for item in best_fit]
+        plot_results(params, convolved, reference, starmask, fxx, fyy, arrayslices, save=save, show=show,
                      figname=figname, edge=edge, alpha0=alpha)
 
-    return res, star_pos, starmask
+    return best_fit, star_pos, starmask

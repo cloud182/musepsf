@@ -176,17 +176,13 @@ class MUSEImage(Image):
             alpha = 2.8
 
         edge = kwargs.pop('edge', 50)
-        dx0 = kwargs.pop('dx0', 0)
-        dy0 = kwargs.pop('dy0', 0)
         self.res, self.star_pos, self.starmask = run_measure_psf(self.data, reference.data,
                                                                  reference.psf, figname,
                                                                  fit_alpha=fit_alpha,
-                                                                 alpha=alpha, fwhm0=0.8,
-                                                                 offset=offset,
-                                                                 scale=self.scale,
-                                                                 plot=plot, save=save,
-                                                                 edge=edge, dx0=dx0, dy0=dy0)
-        self.best_fit = self.res[0]
+                                                                 alpha=alpha, offset=offset,
+                                                                 scale=self.scale, plot=plot,
+                                                                 save=save, edge=edge, **kwargs)
+        self.best_fit = self.res
 
 
     def check_flux_calibration(self, reference, bin_size=15, plot=False, save=False, show=True):
