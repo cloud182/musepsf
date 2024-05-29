@@ -1,17 +1,15 @@
 import numpy as np
 import astropy.units as u
 import matplotlib.pyplot as plt
-import spacepylot.alignment as spalign
-import spacepylot.plotting as pl
-import spacepylot.alignment_utilities as alutils
 
 
+from scipy.ndimage import rotate
 from scipy.odr import ODR, Model, RealData
 from .image import Image
 
 import os
 
-from .utils import plot_images, bin_image, linear_function, run_measure_psf
+from .utils import plot_images, bin_image, linear_function, run_measure_psf, run_spacepylot
 
 
 class MUSEImage(Image):
@@ -113,8 +111,8 @@ class MUSEImage(Image):
         self.scale = self.wcs.proj_plane_pixel_scales()[0].to_value(u.arcsec)
 
 
-    def measure_psf(self, reference: Image, fit_alpha=False, plot=False, align=False, save=False,
-                    show=True, offset=False, **kwargs):
+    def measure_psf(self, reference: Image, fit_alpha=False, plot=False, spacepylot=False,
+                    save=False, show=True, offset=False, optimize=False, **kwargs):
         """
         Measure the PSF of the image by using a cross-convolution technique to compare the
         MUSE image to a reference image with known PSF.
@@ -147,26 +145,24 @@ class MUSEImage(Image):
             plot_images(self.data, reference.data, 'MUSE', 'Reference', outname,
                         save=save, show=show)
 
+        # apply a rotation to remove nans
+        # TBD
+        PA = kwargs.pop('pa', 0)
+
+        if PA != 0:
+            print(f'Applying rotation of {PA} deg')
+            center = [self.data.shape[0] - (self.data.shape[0] + 1) // 2,
+                      self.data.shape[1] - (self.data.shape[1] + 1) // 2]
+
+            self.data = rotate(self.data, PA-90, prefilter=False, reshape=False)
+            self.data = self.data[center[0]-160:center[0]+161, center[1]-160: center[1]+161]
+            reference.data = rotate(reference.data, PA-90, prefilter=False, reshape=False)
+            reference.data = reference.data[center[0]-160:center[0]+161, center[1]-160: center[1]+161]
+
+
+
         # rescaling the flux
         self.check_flux_calibration(reference.data, plot=plot, save=save, show=show)
-
-        # realign with spacepylot
-        if align:
-            print('Align images with spacepylot')
-            op = spalign.AlignOpticalFlow(self.data, reference.data)
-            op.get_iterate_translation_rotation(5)
-            print(op.translation)
-            print(op.rotation_deg)
-            op_plot = pl.AlignmentPlotting.from_align_object(op)
-            op_plot.before_after()
-            figname = os.path.join(self.output_dir, self.filename.replace('.fits', '_spacepylot.png'))
-            plt.savefig(figname, dpi=200)
-            rotated = alutils.rotate_image(self.data, op.rotation_deg)
-            before = self.data.copy()
-            self.data = alutils.translate_image(rotated, op.translation)
-            plt.imshow(before-self.data)
-            plt.savefig(figname.replace('_spacepylot.png', '_test.png'))
-
 
         figname = os.path.join(self.output_dir, self.filename.replace('.fits', '_final.png'))
 
@@ -178,7 +174,15 @@ class MUSEImage(Image):
         edge = kwargs.pop('edge', 50)
         dx0 = kwargs.pop('dx0', 0)
         dy0 = kwargs.pop('dy0', 0)
-        self.res, self.star_pos, self.starmask = run_measure_psf(self.data, reference.data,
+
+        # realign with spacepylot, works as first guesses for loop
+        if spacepylot:
+            data, rotation, translation = run_spacepylot(self.data, reference.data,
+                                                                        verbose=True)
+            self.rotation = rotation
+            self.translation = translation
+
+        self.res, self.star_pos, self.starmask = run_measure_psf(data, reference.data,
                                                                  reference.psf, figname,
                                                                  fit_alpha=fit_alpha,
                                                                  alpha=alpha, fwhm0=0.8,
@@ -187,6 +191,65 @@ class MUSEImage(Image):
                                                                  plot=plot, save=save,
                                                                  edge=edge, dx0=dx0, dy0=dy0)
         self.best_fit = self.res[0]
+
+
+
+        if optimize:
+            print('Optimizing PSF and Offsets')
+
+            fwhm = self.best_fit[0]
+            dfwhm = fwhm
+
+            # initializing differently dx and dy if they have been already fitted or not
+            if offset:
+                dx, dy = self.best_fit[1], self.best_fit[2]
+            else:
+                dx, dy = 0.5 , 0.5
+
+            if fit_alpha:
+                alpha = self.best_fit[-1]
+                dalpha = alpha
+            else:
+                dalpha = 0.01
+
+            i=0
+
+            while dfwhm > 0.1 or np.abs(dx) > 0.1 or np.abs(dy) > 0.1 or dalpha > 0.1:
+                if i>5:
+                    print('Iteration limit reached')
+                    break
+                print(f'\nOptimizing with fwhm: {fwhm:0.2f}, dx: {dx:0.2f}, dy: {dy:0.2f}')
+                rot_old = rotation
+                tran_old = translation
+                fwhm_old = fwhm
+                alpha_old = alpha
+                data, rotation, translation = run_spacepylot(self.data, reference.data,
+                                                             fwhm=fwhm_old, psf=reference.psf,
+                                                             alpha=alpha_old)
+
+                res = run_measure_psf(data, reference.data,
+                                      reference.psf, figname, fit_alpha=fit_alpha,
+                                      alpha=alpha_old, fwhm0=fwhm_old,
+                                      offset=False,
+                                      scale=self.scale,
+                                      plot=True, save=True,
+                                      edge=edge, dx0=0, dy0=0)[0]
+
+                fwhm = res[0][0]
+                dx, dy = np.abs(translation - tran_old)
+                dfwhm = np.abs(fwhm_old - fwhm)
+                dalpha = np.abs(alpha_old - alpha)
+                print(f'Iteration - fwhm: {dfwhm:0.2f}, dd: {translation}, rot: {rotation:0.4e}, alpha: {dalpha:0.2f}')
+
+                i+=1
+
+            print(f'Final values - fwhm: {fwhm:0.2f}, alpha: {alpha}, rot: {rotation:0.4e}, dd: {translation}')
+
+            self.res = res
+            self.best_fit = [fwhm, alpha]
+            self.rotation = rotation
+            self.translation = translation
+
 
 
     def check_flux_calibration(self, reference, bin_size=15, plot=False, save=False, show=True):
