@@ -178,9 +178,11 @@ class MUSEImage(Image):
         # realign with spacepylot, works as first guesses for loop
         if spacepylot:
             data, rotation, translation = run_spacepylot(self.data, reference.data,
-                                                                        verbose=True)
+                                                         verbose=True, **kwargs)
             self.rotation = rotation
             self.translation = translation
+        else:
+            data = self.data
 
         self.res, self.star_pos, self.starmask = run_measure_psf(data, reference.data,
                                                                  reference.psf, figname,
@@ -189,7 +191,8 @@ class MUSEImage(Image):
                                                                  offset=offset,
                                                                  scale=self.scale,
                                                                  plot=plot, save=save,
-                                                                 edge=edge, dx0=dx0, dy0=dy0)
+                                                                 edge=edge, dx0=dx0, dy0=dy0,
+                                                                 **kwargs)
         self.best_fit = self.res[0]
 
 
@@ -252,7 +255,8 @@ class MUSEImage(Image):
 
 
 
-    def check_flux_calibration(self, reference, bin_size=15, plot=False, save=False, show=True):
+    def check_flux_calibration(self, reference, bin_size=15, plot=False, save=False, show=True,
+                               resample=False):
         """
         Check that the flux calibration between the two images is consistent.
 
@@ -269,6 +273,9 @@ class MUSEImage(Image):
                 If True, the plots will be shown. Defaults to True.
         """
 
+        if resample:
+            reference.resample(header=self.header)
+            reference = reference.data
 
         MUSE_median, MUSE_std = bin_image(self.data, bin_size)
         reference_median, reference_std = bin_image(reference, bin_size)

@@ -500,7 +500,6 @@ def run_measure_psf(data, reference, psf, figname=None, alpha=2.8, edge=50, fwhm
     print(f'Using alpha = {alpha}')
 
     print('Performing the fit')
-
     fwhm_bound = kwargs.get('fwhm_bound', [0.2, 2])
     alpha_bound = kwargs.get('alpha_bound', [1, 10])
     dd_bound = kwargs.get('dd_bound', [-2, 2])

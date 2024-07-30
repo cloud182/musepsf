@@ -122,6 +122,9 @@ class Image:
         self.psf = None
         self.stars = None
 
+    def __shape__(self):
+        return self.data.shape
+
     def resample(self, header=None, pixscale=None, inplace=True):
         """
         Resample the image to match a specific resolution or a specific header.
