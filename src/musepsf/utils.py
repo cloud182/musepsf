@@ -4,6 +4,8 @@ import astropy.visualization as vis
 import matplotlib.pyplot as plt
 import numpy as np
 
+from astropy.io import ascii
+from astropy.table import vstack
 from astropy.convolution import Moffat2DKernel
 from astropy.stats import sigma_clipped_stats
 from astroquery.gaia import Gaia
@@ -135,7 +137,7 @@ def linear_function(B, x):
     """ Linear function for the ODR fitting routine"""
     return B[0]*x + B[1]
 
-def locate_stars(image, **kwargs):
+def locate_stars(image, filename=None, **kwargs):
     """
     Routine to automatically detect stars in the image using DAOStarFinder.
 
@@ -156,6 +158,10 @@ def locate_stars(image, **kwargs):
     sigma = kwargs.get('sigma', 3.)
     radius = kwargs.get('radius', 20)
 
+    # checking if there are manual entries
+    if filename is not None:
+        stars = ascii.read(filename, names=['xcentroid', 'ycentroid'])
+
     # Define a threshold to look for stars
     mean, median, std = sigma_clipped_stats(image, sigma=sigma)
     thresh = mean + 10. * std
@@ -164,15 +170,20 @@ def locate_stars(image, **kwargs):
     starfinder = DAOStarFinder(threshold=thresh, fwhm=fwhm, brightest=brightest)
     sources = starfinder(image)
 
-    if sources is not None:
+    if sources is not None and filename is not None:
+        stars = vstack([stars, sources['xcentroid', 'ycentroid']])
+    elif sources is not None and filename is None:
+        stars = sources['xcentroid', 'ycentroid']
+    elif sources is None and filename is None: # otherwise it would reset stars to None
+        stars = None
+
+    if stars is not None:
         mask = np.zeros(image.shape, dtype=bool)
         yy, xx = np.mgrid[ :image.shape[0], :image.shape[1]]
-        stars = sources['xcentroid', 'ycentroid']
         for star in stars:
             distance = np.sqrt((xx-star['xcentroid'])**2+(yy-star['ycentroid'])**2)
             mask[distance < radius] = True
     else:
-        stars = None
         mask = None
 
     return stars, mask
@@ -429,7 +440,7 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
         plt.close()
 
 
-def run_measure_psf(data, reference, psf, figname=None, alpha=2.8, edge=50, fwhm0=0.8, dx0=0, dy0=0,
+def run_measure_psf(data, reference, psf, star_pos, starmask, figname=None, alpha=2.8, edge=50, fwhm0=0.8, dx0=0, dy0=0,
                     fit_alpha=False, plot=False, save=False, show=False, scale=0.2,
                     offset=False, **kwargs):
     """
@@ -471,9 +482,6 @@ def run_measure_psf(data, reference, psf, figname=None, alpha=2.8, edge=50, fwhm
         np.ndarray:
             boolean mask selecting the pixels associated to stellar emission that should be masked.
     """
-
-
-    star_pos, starmask = locate_stars(data, **kwargs)
 
     nanmask = np.isnan(data)
 

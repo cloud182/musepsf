@@ -9,7 +9,7 @@ from .image import Image
 
 import os
 
-from .utils import plot_images, bin_image, linear_function, run_measure_psf, run_spacepylot
+from .utils import plot_images, bin_image, linear_function, run_measure_psf, run_spacepylot, locate_stars
 
 
 class MUSEImage(Image):
@@ -109,6 +109,9 @@ class MUSEImage(Image):
         super().__init__(filename, input_dir, output_dir, datahdu, headerhdu, debug, units)
 
         self.scale = self.wcs.proj_plane_pixel_scales()[0].to_value(u.arcsec)
+        self.region_dir = os.path.join(self.output_dir, 'regions')
+        if not os.path.isdir(self.region_dir):
+            os.makedirs(self.region_dir)
 
 
     def measure_psf(self, reference: Image, fit_alpha=False, plot=False, spacepylot=False,
@@ -159,8 +162,6 @@ class MUSEImage(Image):
             reference.data = rotate(reference.data, PA-90, prefilter=False, reshape=False)
             reference.data = reference.data[center[0]-160:center[0]+161, center[1]-160: center[1]+161]
 
-
-
         # rescaling the flux
         self.check_flux_calibration(reference.data, plot=plot, save=save, show=show)
 
@@ -184,8 +185,18 @@ class MUSEImage(Image):
         else:
             data = self.data
 
+        reg_name = os.path.join(self.region_dir, self.filename.replace('.fits', '_regions.reg'))
+
+        if os.path.isfile(reg_name):
+            print('Including manually selected sources')
+            star_pos, starmask = locate_stars(data, filename=reg_name, **kwargs)
+        else:
+            star_pos, starmask = locate_stars(data, filename=None, **kwargs)
+
         self.res, self.star_pos, self.starmask = run_measure_psf(data, reference.data,
-                                                                 reference.psf, figname,
+                                                                 reference.psf,
+                                                                 star_pos, starmask,
+                                                                 figname=figname,
                                                                  fit_alpha=fit_alpha,
                                                                  alpha=alpha, fwhm0=0.8,
                                                                  offset=offset,
