@@ -22,10 +22,11 @@ dependencies = [
     "numpy",
     "scipy >=1.9c",
     "astroquery",
-    "photutils",
+    "photutils >=2.0.2",
     "reproject >=0.10.0",
     "regions",
     "matplotlib",
+    "spacepylot @ git+https://github.com/ejwatkins-astro/spacepylot.git"
 ]
 
 [project.urls]
