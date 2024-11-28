@@ -26,7 +26,10 @@ dependencies = [
     "reproject >=0.10.0",
     "regions",
     "matplotlib",
-    "spacepylot @ git+https://github.com/ejwatkins-astro/spacepylot.git"
+    "scikit-image",
+    "spacepylot @ git+https://github.com/ejwatkins-astro/spacepylot.git",
+    "wget"
+
 ]
 
 [project.urls]
