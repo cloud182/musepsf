@@ -3,8 +3,10 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import astropy.visualization as vis
 import matplotlib.pyplot as plt
 import numpy as np
+import astropy.units as u
 
-from astropy.io import ascii
+from astropy.io import ascii, fits
+from astropy.wcs import WCS
 from astropy.table import vstack
 from astropy.convolution import Moffat2DKernel
 from astropy.stats import sigma_clipped_stats
@@ -12,15 +14,23 @@ from astroquery.gaia import Gaia
 from photutils.detection import DAOStarFinder
 from astropy.convolution import convolve_fft
 from scipy.optimize import leastsq
+from scipy.ndimage import zoom
 from numpy.fft import fftfreq
 
 import spacepylot.alignment as spalign
 import spacepylot.plotting as pl
 import spacepylot.alignment_utilities as alutils
 
+import wget
+import os
+import copy
+import shutil
+
+
 # configure astroquery gaia
 Gaia.ROW_LIMIT = 10000
 Gaia.MAIN_GAIA_TABLE = "gaiadr3.gaia_source"
+SDSS_URL = "https://data.sdss.org/sas/dr13/eboss/photo/redux"
 
 def query_gaia(center, radius):
     """
@@ -571,3 +581,96 @@ def run_spacepylot(data, reference, figname=None, fwhm=None, psf=None, alpha=2.8
         plt.savefig(figname.replace('.png', '_diff.png'))
 
     return data, op.rotation_deg, op.translation
+
+
+def download_ps_file(run, camcol, frame, rerun, out_dir="ps_field"):
+    """Download psFile given various identifying info"""
+
+    ps_url = f"{SDSS_URL}/{rerun}/{run[2:]}/objcs/{camcol}/psField-{run:06}-{camcol}-{frame:04}.fit"
+    wget.download(ps_url, out=out_dir)
+
+    return True
+
+
+def reconstruct_psf(ps_file, sdss_filter, row, col):
+    """Reconstruct PSF from psFile"""
+
+    filter_idx = 'ugriz'.index(sdss_filter) + 1
+    ps_field = fits.open(ps_file)
+    ps = ps_field[filter_idx].data
+
+    nrow_b = ps['nrow_b'][0]
+    ncol_b = ps['ncol_b'][0]
+
+    rnrow = ps['rnrow'][0]
+    rncol = ps['rncol'][0]
+
+    nb = nrow_b * ncol_b
+    coeffs = np.zeros(nb.size, float)
+    ecoeff = np.zeros(3, float)
+    cmat = ps['c']
+
+    rcs = 0.001
+    for ii in range(0, nb.size):
+        coeffs[ii] = (row * rcs) ** (ii % nrow_b) * (col * rcs) ** (ii / nrow_b)
+
+    for jj in range(0, 3):
+        for ii in range(0, nb.size):
+            ecoeff[jj] = ecoeff[jj] + cmat[int(ii / nrow_b), ii % nrow_b, jj] * coeffs[ii]
+
+    psf = ps['rrows'][0] * ecoeff[0] + ps['rrows'][1] * ecoeff[1] + ps['rrows'][2] * ecoeff[2]
+
+    psf = np.reshape(psf, (rnrow, rncol))
+
+    return psf
+
+
+def create_sdss_psf(data, hdr, out_dir, pixscale=0.2, sdss_pixscale=0.396):
+    """Read in an SDSS tile and generate PSF at centre of chip"""
+
+    tmp_output = os.path.join(out_dir, 'tmp')
+    if not os.path.isdir(tmp_output):
+        os.mkdir(tmp_output)
+
+    # We'll just evaluate the PSF at the chip centre
+    row, col = np.asarray(data.shape) / 2
+
+    # Pull out filter, run, rerun, camcol, and frame from the header
+
+    PSFs = []
+
+    for i in range(1, 30):
+        try:
+            file_string = hdr[f'FILE{i:04d}'][:-5].split('-')
+        except KeyError:
+            break
+
+        sdss_filter = file_string[1]
+        run = file_string[2]
+        camcol = file_string[3]
+        frame = file_string[4]
+
+        # Build the filename
+        ps_file = os.path.join(tmp_output, f"psField-{run}-{camcol}-{frame}.fit")
+
+        if not os.path.exists(ps_file):
+            download_ps_file(run=run, camcol=camcol, frame=frame, rerun=301,
+                             out_dir=tmp_output)
+
+        psf = reconstruct_psf(ps_file, sdss_filter=sdss_filter, row=row, col=col)
+
+        # If the image isn't in native SDSS pixel scale, resample here
+        if pixscale != sdss_pixscale:
+            psf = zoom(psf, zoom=sdss_pixscale / pixscale)
+
+        # Ensure PSF is normalised
+        psf /= np.nansum(psf)
+
+        PSFs.append(psf)
+
+    shutil.rmtree(tmp_output, ignore_errors=True)
+
+
+    psf = np.mean(PSFs, axis=0)
+
+    return psf

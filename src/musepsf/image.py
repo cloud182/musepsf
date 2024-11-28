@@ -11,17 +11,18 @@ from astropy.stats import sigma_clipped_stats
 from astropy.nddata import NDData, Cutout2D
 from astropy.nddata.utils import NoOverlapError
 from astropy.coordinates import SkyCoord
+from astropy.visualization import simple_norm
 from astroquery.gaia import Gaia
 from photutils.psf import extract_stars
 from reproject import reproject_interp
 from regions import EllipseSkyRegion
-from photutils import EPSFBuilder
+from photutils.psf import EPSFBuilder
 from mpdaf.obj import Image as MPDAFImage
 
 import sys
 import os
 
-from .utils import query_gaia
+from .utils import query_gaia, create_sdss_psf
 
 class Image:
     """
@@ -200,7 +201,7 @@ class Image:
             pa (u.deg):
                 Position angle of the ellipse. Counted from North, counter-clockwise
         """
-        self.galaxy = EllipseSkyRegion(center, width=amin, height=amax, angle=pa)
+        self.galaxy = EllipseSkyRegion(center, width=2*amin, height=2*amax, angle=pa)
 
         if self.debug:
             plt.imshow(self.data, origin='lower', vmin=0, vmax=5)
@@ -208,7 +209,7 @@ class Image:
             pixel_region.plot()
             plt.show()
 
-    def get_gaia_catalog(self, center, gmin, gmax, radius=10*u.arcmin, save=True):
+    def get_gaia_catalog(self, center, gmin, gmax, radius=10*u.arcmin, save=True, show=False):
         """
         Query the Gaia Catalog to identify stars in the field of the galaxy.
 
@@ -230,14 +231,34 @@ class Image:
         print(f'Selecting stars between {gmin} and {gmax} G mag')
         gaia_cat = gaia_cat[mask1].copy()
 
-        if self.galaxy is not None:
-            coords = SkyCoord(gaia_cat['ra'], gaia_cat['dec'], unit=(u.deg, u.deg))
-            mask2 = self.galaxy.contains(coords, wcs=self.wcs)
-            gaia_cat = gaia_cat[~mask2].copy()
+        coords = SkyCoord(gaia_cat['ra'], gaia_cat['dec'], unit=(u.deg, u.deg))
+        inside = np.array([True if self.wcs.footprint_contains(coord) else False for coord in coords])
 
+        if self.galaxy is not None:
+            mask2 = self.galaxy.contains(coords, wcs=self.wcs)
+
+        gaia_cat = gaia_cat[inside*(~mask2)].copy()
         self.stars = gaia_cat
-        outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.fits'))
-        self.stars.write(outname, overwrite=True)
+
+        # plotting some diagnostics results
+        fig, ax = plt.subplots(1, 1, figsize=(14, 14), subplot_kw={'projection': self.wcs})
+        norm = simple_norm(self.data, 'log', percent=99.9)
+        ax.imshow(self.data, norm=norm)
+        ax.scatter(self.stars['ra'], self.stars['dec'], transform=ax.get_transform('world'),
+                   s=80, facecolors='none', edgecolors='r')
+        pixel_region = self.galaxy.to_pixel(self.wcs)
+        pixel_region.plot(ax=ax)
+        ax.set_xlabel('RA')
+        ax.set_ylabel('Dec')
+        if save:
+            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.png'))
+            plt.savefig(outname, dpi=300)
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
+
 
     def build_startable(self, coords, data, wcs):
 
@@ -323,7 +344,7 @@ class Image:
         """
 
         if pixscale is not None:
-            data, wcs, header = self.resample(pixscale=pixscale, inplace=False)
+            data, wcs, _ = self.resample(pixscale=pixscale, inplace=False)
             self.psfscale = pixscale
         else:
             data = self.data
@@ -333,15 +354,14 @@ class Image:
 
         if stars_file is None:
             self.get_gaia_catalog(center, gmin, gmax, radius=radius)
-
-            coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
-
-            stars_tbl = self.build_startable(coords, data, wcs)
-
-            stars_tbl.write(self.output_dir, self.filename.replace('.fits', '.stars.dat'), overwrite=True)
-
+            self.stars['ra', 'dec'].write(os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.dat')),
+                            format='ascii.no_header', overwrite=True)
         else:
-            stars_tbl = ascii.read(stars_file)
+            print(f'Using {stars_file}')
+            self.stars = ascii.read(stars_file, format='no_header', names=['x', 'y'])
+
+        coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
+        stars_tbl = self.build_startable(coords, data, wcs)
 
         nddata = NDData(data=data)
         stars = extract_stars(nddata, stars_tbl, size=npix)
@@ -375,15 +395,36 @@ class Image:
         else:
             sys.exit('No stars were used for the fit.')
 
-        # plotting some diagnostics results
+        self.plot_psf(new_psf.data, residual=residual, save=save, show=show)
+
+        # saving the ePSF as a fits file, making sure it is normalized to 1
+
+        psf_flux = np.sum(new_psf.data)
+        if np.abs(1-psf_flux) < 0.0001:
+            hdu = fits.PrimaryHDU(new_psf.data)
+            self.psf = new_psf.data
+        else:
+            hdu = fits.PrimaryHDU(new_psf.data / psf_flux)
+            self.psf = new_psf.data / psf_flux
+        hdu.header['PSFSCALE'] = self.psfscale
+        out = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.fits'))
+        hdu.writeto(out, overwrite=True)
+
+
+    def plot_psf(self, data, residual=None, save=True, show=False):
+      # plotting some diagnostics results
         fig = plt.figure(figsize=(14, 6))
         gs = fig.add_gridspec(1, 3)
         ax1 = fig.add_subplot(gs[0, 0])
         ax2 = fig.add_subplot(gs[0, 1], projection='3d')
         ax3 = fig.add_subplot(gs[0, 2])
-        xx, yy = np.indices(new_psf.shape)
-        ax1.imshow(new_psf.data, origin='lower')
-        ax2.plot_surface(xx, yy, new_psf.data)
+        xx, yy = np.indices(data.shape)
+        ax1.imshow(data, origin='lower')
+        ax2.plot_surface(xx, yy, data)
+
+        if residual==None:
+            residual = np.zeros_like(data)
+
         ax3.imshow(residual, origin='lower')
         ax1.set_title('PSF')
         ax2.set_title('PSF - 3D')
@@ -396,16 +437,33 @@ class Image:
         else:
             plt.close()
 
-        # saving the ePSF as a fits file, making sure it is normalized to 1
+    def recover_SDSS_PSF(self, save=True, show=False, pixscale=0.2):
 
-        psf_flux = np.sum(new_psf.data)
+        if pixscale is not None:
+            data, wcs, header = self.resample(pixscale=pixscale, inplace=False)
+            self.psfscale = pixscale
+
+        else:
+            data = self.data
+            header = self.header
+            wcs = WCS(header)
+            self.psfscale = np.around(self.wcs.proj_plane_pixel_scales()[0].to(u.arcsec).value, 3)
+
+        new_psf = create_sdss_psf(data, header, self.output_dir, pixscale=self.psfscale)
+
+        psf_flux = np.sum(new_psf)
+
         if np.abs(1-psf_flux) < 0.0001:
-            hdu = fits.PrimaryHDU(new_psf.data)
+            hdu = fits.PrimaryHDU(new_psf)
             self.psf = new_psf.data
         else:
-            hdu = fits.PrimaryHDU(new_psf.data / psf_flux)
-            self.psf = new_psf.data / psf_flux
+            hdu = fits.PrimaryHDU(new_psf / psf_flux)
+            self.psf = new_psf / psf_flux
+
         hdu.header['PSFSCALE'] = self.psfscale
+
+        self.plot_psf(new_psf, residual=None, save=save, show=show)
+
         out = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.fits'))
         hdu.writeto(out, overwrite=True)
 
