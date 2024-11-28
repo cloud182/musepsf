@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import astropy.units as u
 
-from astropy.io import fits
+from astropy.io import fits, ascii
 from astropy.wcs import WCS
 from astropy.table import Table
 from astropy.stats import sigma_clipped_stats
@@ -295,7 +295,7 @@ class Image:
 
         return stars_tbl
 
-    def build_psf(self, center, gmin, gmax, radius=10*u.arcmin, npix=35, pixscale=0.2,
+    def build_psf(self, center, gmin, gmax, stars_file=None, radius=10*u.arcmin, npix=35, pixscale=0.2,
                   oversampling=4, save=True, show=True):
         """
         Build the ePSF of the considered image. Extracted from the EPSFBuilder tutorial
@@ -331,11 +331,17 @@ class Image:
             header = self.header
             self.psfscale = np.around(self.wcs.proj_plane_pixel_scales()[0].to(u.arcsec).value, 3)
 
-        self.get_gaia_catalog(center, gmin, gmax, radius=radius)
+        if stars_file is None:
+            self.get_gaia_catalog(center, gmin, gmax, radius=radius)
 
-        coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
+            coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
 
-        stars_tbl = self.build_startable(coords, data, wcs)
+            stars_tbl = self.build_startable(coords, data, wcs)
+
+            stars_tbl.write(self.output_dir, self.filename.replace('.fits', '.stars.dat'), overwrite=True)
+
+        else:
+            stars_tbl = ascii.read(stars_file)
 
         nddata = NDData(data=data)
         stars = extract_stars(nddata, stars_tbl, size=npix)

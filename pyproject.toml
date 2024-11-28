@@ -1,30 +1,32 @@
-[tool.poetry]
-name = "musepsf"
-version = "0.3.1"
-description = "Measure the FWHM of MUSE PSF using cross convolution and a reference image"
-authors = ["Enrico Congiu"]
-license = "MIT"
-readme = "README.md"
-
-[tool.poetry.dependencies]
-python = "^3.9,<3.12"
-astropy = ">=5.2"
-numpy = "^1.21"
-scipy = ">=1.9c"
-astroquery = "^0.4.6"
-photutils = "^1.6.0"
-reproject = ">=0.10.0"
-regions = "^0.7"
-matplotlib = "^3.7.1"
-
-[tool.poetry.dev-dependencies]
-python = "^3.9,<3.12"
-
-[tool.poetry.group.dev.dependencies]
-myst-nb = {version = "^0.17.1", python = "^3.10"}
-sphinx-autoapi = "^2.1.0"
-sphinx-rtd-theme = "^1.2.0"
-
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+
+[project]
+name = "musepsf"
+version = "0.3.2"
+authors = [
+  { name="Enrico Congiu", email="econgiu@eso.org" },
+]
+description = "Measure the FWHM of MUSE PSF using cross convolution and a reference image"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Linux, MacOS",
+]
+dependencies = [
+    "astropy >=5.2",
+    "numpy",
+    "scipy >=1.9c",
+    "astroquery",
+    "photutils",
+    "reproject >=0.10.0",
+    "regions",
+    "matplotlib",
+]
+
+[project.urls]
+Homepage = "https://github.com/cloud182/musepsf"
