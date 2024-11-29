@@ -26,6 +26,8 @@ import os
 import copy
 import shutil
 
+from urllib.error import HTTPError
+
 
 # configure astroquery gaia
 Gaia.ROW_LIMIT = 10000
@@ -586,8 +588,9 @@ def run_spacepylot(data, reference, figname=None, fwhm=None, psf=None, alpha=2.8
 def download_ps_file(run, camcol, frame, rerun, out_dir="ps_field"):
     """Download psFile given various identifying info"""
 
-    ps_url = f"{SDSS_URL}/{rerun}/{run[2:]}/objcs/{camcol}/psField-{run:06}-{camcol}-{frame:04}.fit"
+    ps_url = f"{SDSS_URL}/{rerun}/{int(run)}/objcs/{camcol}/psField-{run:06}-{camcol}-{frame:04}.fit"
     wget.download(ps_url, out=out_dir)
+
 
     return True
 
@@ -655,7 +658,7 @@ def create_sdss_psf(data, hdr, out_dir, pixscale=0.2, sdss_pixscale=0.396):
 
         if not os.path.exists(ps_file):
             download_ps_file(run=run, camcol=camcol, frame=frame, rerun=301,
-                             out_dir=tmp_output)
+                            out_dir=tmp_output)
 
         psf = reconstruct_psf(ps_file, sdss_filter=sdss_filter, row=row, col=col)
 
