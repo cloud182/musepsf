@@ -18,6 +18,9 @@ from reproject import reproject_interp
 from regions import EllipseSkyRegion
 from photutils.psf import EPSFBuilder
 from mpdaf.obj import Image as MPDAFImage
+from photutils.psf import EPSFStars
+from astropy.visualization import (PercentileInterval, AsinhStretch,
+                                   ImageNormalize)
 
 import sys
 import os
@@ -209,6 +212,27 @@ class Image:
             pixel_region.plot()
             plt.show()
 
+    def plot_galaxy(self, plot_stars=False):
+        plt.figure()
+        if plot_stars ==True:
+            data = self.resampled_data
+            wcs_plot = self.resampled_wcs
+        else:
+            data=self.data
+            wcs_plot = self.wcs
+        norm = ImageNormalize(data, interval=PercentileInterval(99.97),
+                      stretch=AsinhStretch(a=0.01), vmin=0.1*np.nanstd(data) )
+        plt.imshow(data, origin='lower',  norm=norm)
+        pixel_region = self.galaxy.to_pixel(wcs_plot)
+        pixel_region.plot(color='red')
+        if plot_stars == True:
+            for i in range(len(self.stars_tbl)):
+                plt.scatter(self.stars_tbl['x'][i], self.stars_tbl['y'][i], s=100, marker='o', 
+                            edgecolor='r', facecolor='none')
+                plt.text(self.stars_tbl['x'][i]+10, self.stars_tbl['y'][i]+10, i , color='r')
+            
+        plt.show()
+        
     def get_gaia_catalog(self, center, gmin, gmax, radius=10*u.arcmin, save=True, show=False):
         """
         Query the Gaia Catalog to identify stars in the field of the galaxy.
@@ -315,12 +339,82 @@ class Image:
         stars_tbl['y'] = y
 
         return stars_tbl
+    def build_startable(self, coords, data, wcs):
 
-    def build_psf(self, center, gmin, gmax, stars_file=None, radius=10*u.arcmin, npix=35, pixscale=0.2,
-                  oversampling=4, save=True, show=True):
         """
-        Build the ePSF of the considered image. Extracted from the EPSFBuilder tutorial
+        Refine the position of the stars and build the star table that will be fed to the
+        ePSF builder
 
+        Args:
+            coords (list):
+                list of coordinates of the selected stars.
+            data (np.ndarray):
+                data array.
+            wcs (astropy.wcs.WCS):
+                wcs associated to the data array.
+
+        Returns:
+            astropy.table.Table:
+                Astropy table with the x and y coordinates of the selected stars.
+        """
+
+        x, y = [], []
+
+        # fitter = fitting.LevMarLSQFitter()
+
+        #recentering the stars. Weirdly fitting a gaussian does not work. For now,
+        #I'll try with identifying the max. Will see
+        for i, coord in enumerate(coords):
+            try:
+                zoom = Cutout2D(data, coord, 7*u.arcsec, wcs=wcs)
+            except NoOverlapError:
+                continue
+            if not np.isfinite(zoom.data).all():
+                continue
+            guess = np.unravel_index(zoom.data.argmax(), zoom.data.shape)
+            # model = models.Gaussian2D(np.nanmax(zoom.data), x_mean=guess[1], y_mean=guess[0],
+            #                           x_stddev=5, y_stddev=5)+models.Const2D(np.nanmean(zoom.data))
+            # model.theta_0.fixed=True
+            # xx, yy = np.mgrid[:zoom.data.shape[1], :zoom.data.shape[0]]
+            # fit = fitter(model, xx, yy, zoom.data)
+            # newcoord = zoom.wcs.pixel_to_world(fit.x_mean_0, fit.y_mean_0)
+            # if self.debug:
+            #     plt.imshow(zoom.data, origin='lower')
+            #     plt.scatter(fit.x_mean_0, fit.y_mean_0, c='r')
+            #     plt.scatter(guess[1], guess[0])
+            #     plt.show()
+            #     print(fit)
+            newcoord = zoom.wcs.pixel_to_world(guess[1], guess[0])
+            newpix = wcs.world_to_pixel(newcoord)
+            x.append(newpix[0])
+            y.append(newpix[1])
+
+        stars_tbl = Table()
+        stars_tbl['x'] = x
+        stars_tbl['y'] = y
+        self.stars_tbl = stars_tbl
+        return stars_tbl
+    
+    def plot_stars(self, stars):
+        fig = plt.figure(figsize=(10, int(len(stars)/5)*2))
+        gs = fig.add_gridspec(int(len(stars)/5)+1, 5)  
+        plt.tight_layout()
+        # removing the local background from the selected stars
+        for i, star in enumerate(stars):
+            mean, median, std = sigma_clipped_stats(star.data, sigma=2.0)
+            star._data = star._data-median
+            ax = fig.add_subplot(gs[i])
+            norm = ImageNormalize(star._data, interval=PercentileInterval(99.97),
+                stretch=AsinhStretch(a=0.01), vmin=0.01*np.nanstd(star._data) )
+            ax.imshow(star._data, origin='lower', norm=norm)
+            ax.text(0.1, 0.1, str(i), color='r')
+       
+        plt.tight_layout()
+        plt.show()
+        
+    def make_stars(self, center, gmin=18, gmax=20, radius=10*u.arcmin, npix=35, pixscale=0.2):
+        
+        """
         Args:
             center (SkyCoord):
                 Center of the considered field.
@@ -335,53 +429,70 @@ class Image:
             pixscale (float, optional):
                 pixelscale to use to resample the data array before computing the ePSF. If None,
                 no resampling is applied. Defaults to 0.2.
-            oversampling (int, optional):
-                Oversampling factor for the EPSF builder. Defaults to 4.
+                
+        """
+        if pixscale is not None:
+                self.resampled_data, self.resampled_wcs, header = self.resample(pixscale=pixscale, inplace=False)
+                self.psfscale = pixscale
+        else:
+                self.resampled_data = self.data
+                self.resampled_wcs = self.wcs
+                header = self.header
+                self.psfscale = np.around(self.wcs.proj_plane_pixel_scales()[0].to(u.arcsec).value, 3)
+
+        self.get_gaia_catalog(center, gmin, gmax, radius=radius)
+
+        coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
+
+        stars_tbl = self.build_startable(coords, self.resampled_data,  self.resampled_wcs)
+
+        nddata = NDData(data=self.resampled_data)
+        stars = extract_stars(nddata, stars_tbl, size=npix)
+        self.stars = stars
+
+        if self.debug:
+            self.plot_galaxy(plot_stars=True)
+            self.plot_stars(self.stars)
+            
+    def drop_stars(self,  drop=[]):
+        w = np.arange(len(self.stars), dtype=int)
+        w = np.array([i for i in w if i not in drop])
+
+        only_some_stars = []
+        for i in range(len(w)):
+            only_some_stars.append(self.stars.all_good_stars[w[i]])
+
+        only_some_stars = EPSFStars(only_some_stars)
+        self.stars = only_some_stars
+    
+    def build_psf(self, center=None, oversampling=4, save=True, show=True,  **kwargs):
+        """
+        Build the ePSF of the considered image. Extracted from the EPSFBuilder tutorial
+        https://photutils.readthedocs.io/en/stable/epsf.html
+
+        Args:
             save (bool, optional):
                 Save the output plots. Defaults to True.
             show (bool, optional):
                 Show the output plots. Defaults to True.
+            oversampling (int, optional):
+                    Oversampling factor for the EPSF builder. Defaults to 4.
         """
-
-        if pixscale is not None:
-            data, wcs, _ = self.resample(pixscale=pixscale, inplace=False)
-            self.psfscale = pixscale
+        if (self.stars is None):
+            print('making star cutouts')
+            self.stars = self.make_star_cutouts(center=center, **kwargs)
         else:
-            data = self.data
-            wcs = self.wcs
-            header = self.header
-            self.psfscale = np.around(self.wcs.proj_plane_pixel_scales()[0].to(u.arcsec).value, 3)
-
-        if stars_file is None:
-            self.get_gaia_catalog(center, gmin, gmax, radius=radius)
-            self.stars['ra', 'dec'].write(os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.dat')),
-                            format='ascii.no_header', overwrite=True)
-        else:
-            print(f'Using {stars_file}')
-            self.stars = ascii.read(stars_file, format='no_header', names=['x', 'y'])
-
-        coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
-        stars_tbl = self.build_startable(coords, data, wcs)
-
-        nddata = NDData(data=data)
-        stars = extract_stars(nddata, stars_tbl, size=npix)
-
-        # removing the local background from the selected stars
-        for star in stars:
-            mean, median, std = sigma_clipped_stats(star.data, sigma=2.0)
-            star._data = star._data-median
-            if self.debug:
-                plt.imshow(star._data, origin='lower')
-                plt.show()
+            print('loading stars from input')
+            
 
         epsf_builder = EPSFBuilder(oversampling=oversampling, progress_bar=True,
                                    center_accuracy=0.1, maxiters=50)
 
         # rebuilding the ePSF with the proper sampling
-        epsf, fitted_stars = epsf_builder(stars)
-        yy, xx = np.indices(stars[0].shape, dtype=float)
-        xx = xx - stars[0].cutout_center[0]
-        yy = yy - stars[0].cutout_center[1]
+        epsf, fitted_stars = epsf_builder(self.stars)
+        yy, xx = np.indices(self.stars[0].shape, dtype=float)
+        xx = xx - self.stars[0].cutout_center[0]
+        yy = yy - self.stars[0].cutout_center[1]
         new_psf = epsf.evaluate(xx, yy, 1., 0, 0)
 
         residuals = []
@@ -395,7 +506,26 @@ class Image:
         else:
             sys.exit('No stars were used for the fit.')
 
-        self.plot_psf(new_psf.data, residual=residual, save=save, show=show)
+        # plotting some diagnostics results
+        fig = plt.figure(figsize=(14, 6))
+        gs = fig.add_gridspec(1, 3)
+        ax1 = fig.add_subplot(gs[0, 0])
+        ax2 = fig.add_subplot(gs[0, 1], projection='3d')
+        ax3 = fig.add_subplot(gs[0, 2])
+        xx, yy = np.indices(new_psf.shape)
+        ax1.imshow(new_psf.data, origin='lower')
+        ax2.plot_surface(xx, yy, new_psf.data)
+        ax3.imshow(residual, origin='lower')
+        ax1.set_title('PSF')
+        ax2.set_title('PSF - 3D')
+        ax3.set_title('Residuals')
+        if save:
+            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.png'))
+            plt.savefig(outname, dpi=300)
+        if show:
+            plt.show()
+        else:
+            plt.close()
 
         # saving the ePSF as a fits file, making sure it is normalized to 1
 
@@ -450,7 +580,7 @@ class Image:
             self.psfscale = np.around(self.wcs.proj_plane_pixel_scales()[0].to(u.arcsec).value, 3)
 
         new_psf = create_sdss_psf(data, header, self.output_dir, pixscale=self.psfscale)
-
+        self.sdss_psf = new_psf
         psf_flux = np.sum(new_psf)
 
         if np.abs(1-psf_flux) < 0.0001:
@@ -466,6 +596,7 @@ class Image:
 
         out = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.fits'))
         hdu.writeto(out, overwrite=True)
+        
 
     def convert_units(self, out_units, equivalency=None):
         """

@@ -1,15 +1,16 @@
 import numpy as np
 import astropy.units as u
 import matplotlib.pyplot as plt
-
+from astropy import table
 
 from scipy.ndimage import rotate
 from scipy.odr import ODR, Model, RealData
 from .image import Image
 
+
 import os
 
-from .utils import plot_images, bin_image, linear_function, run_measure_psf, run_spacepylot, locate_stars
+from .utils import plot_images, bin_image, linear_function, run_measure_psf, run_spacepylot, locate_stars, make_mask
 
 
 class MUSEImage(Image):
@@ -114,8 +115,7 @@ class MUSEImage(Image):
             os.makedirs(self.region_dir)
 
 
-    def measure_psf(self, reference: Image, fit_alpha=False, plot=False, spacepylot=False,
-                    save=False, show=True, offset=False, optimize=False, **kwargs):
+    def measure_psf(self, reference: Image, fit_alpha=False, plot=False, spacepylot=False,save=False, show=True, offset=False, optimize=False, mask_stars=False, mask_regions=None, **kwargs):
         """
         Measure the PSF of the image by using a cross-convolution technique to compare the
         MUSE image to a reference image with known PSF.
@@ -186,12 +186,28 @@ class MUSEImage(Image):
             data = self.data
 
         reg_name = os.path.join(self.region_dir, self.filename.replace('.fits', '_regions.reg'))
-
-        if os.path.isfile(reg_name):
-            print('Including manually selected sources')
-            star_pos, starmask = locate_stars(data, filename=reg_name, **kwargs)
+        self.reg_name = reg_name
+        if mask_stars is True:
+            if os.path.isfile(reg_name):
+                print('Including manually selected sources')
+                star_pos, starmask = locate_stars(data, filename=reg_name, **kwargs)
+            else:
+                star_pos, starmask = locate_stars(data, filename=None, **kwargs)
         else:
-            star_pos, starmask = locate_stars(data, filename=None, **kwargs)
+            star_pos=None 
+            starmask = np.zeros_like(data, dtype=bool)
+            
+        if mask_regions is not None:
+            print('manually masking regions')
+            radius = kwargs.pop('radius', 20)
+            stars=table.Table()
+            stars['xcentroid'] = np.zeros_like(mask_regions)
+            stars['ycentroid'] = np.zeros_like(mask_regions)
+            
+            for i in range(len(mask_regions)):
+                stars['xcentroid'][i], stars['ycentroid'][i] = reference.wcs.world_to_pixel(mask_regions[i])
+
+            starmask = make_mask(stars, reference.data, radius)
 
         self.res, self.star_pos, self.starmask = run_measure_psf(data, reference.data,
                                                                  reference.psf,
@@ -205,8 +221,8 @@ class MUSEImage(Image):
                                                                  edge=edge, dx0=dx0, dy0=dy0,
                                                                  **kwargs)
         self.best_fit = self.res[0]
-
-
+        self.alpha=alpha
+        self.reference = reference
 
         if optimize:
             print('Optimizing PSF and Offsets')
@@ -242,11 +258,12 @@ class MUSEImage(Image):
                                                              alpha=alpha_old)
 
                 res = run_measure_psf(data, reference.data,
-                                      reference.psf, figname, fit_alpha=fit_alpha,
+                                      reference.psf,  star_pos, starmask,
+                                      figname, fit_alpha=fit_alpha,
                                       alpha=alpha_old, fwhm0=fwhm_old,
                                       offset=False,
                                       scale=self.scale,
-                                      plot=True, save=True,
+                                      plot=True, save=save,
                                       edge=edge, dx0=0, dy0=0)[0]
 
                 fwhm = res[0][0]
@@ -263,6 +280,7 @@ class MUSEImage(Image):
             self.best_fit = [fwhm, alpha]
             self.rotation = rotation
             self.translation = translation
+            self.alpha=alpha
 
 
 

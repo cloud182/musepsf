@@ -189,6 +189,12 @@ def locate_stars(image, filename=None, **kwargs):
     elif sources is None and filename is None: # otherwise it would reset stars to None
         stars = None
 
+    mask = make_mask(stars, image, radius)
+    
+    return stars, mask
+
+def make_mask(stars, image, radius):
+    
     if stars is not None:
         mask = np.zeros(image.shape, dtype=bool)
         yy, xx = np.mgrid[ :image.shape[0], :image.shape[1]]
@@ -197,8 +203,8 @@ def locate_stars(image, filename=None, **kwargs):
             mask[distance < radius] = True
     else:
         mask = None
-
-    return stars, mask
+        
+    return(mask)
 
 def moffat_kernel(fwhm, alpha, scale=0.238, img_size=241):
     """
@@ -233,8 +239,6 @@ def apply_mask(image, starmask, nanmask, edge=5):
     Args:
         image1 (np.ndarray):
             First image
-        image2 (np.ndarray):
-            Second image
         starmask (np.ndarray):
             array containing the stellar mask
         edge (int, optional):
@@ -242,9 +246,7 @@ def apply_mask(image, starmask, nanmask, edge=5):
 
     Returns:
         np.ndarray:
-            Masked and trimmed version of image1
-        np.ndarray:
-            Masked and trimmed version of image2
+            Masked version of image
         """
 
     masked = np.ma.masked_array(data=image, mask=nanmask)
@@ -351,7 +353,7 @@ def apply_offset_fourier(convolved, dx, dy, fxx, fyy, arrayslices):
 
 
 
-def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, figname, save=False, show=False,
+def plot_results(pars, convolved, reference, starmask, figname, save=False, show=False,
                  edge=50, alpha0=None, scale=0.2):
     """
     Functions that plot the final results of the PSF fitting
@@ -398,10 +400,28 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
 
     # convolving WFI image for the model of MUSE PSF
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
+
+    # this stuff is needed for shifting the WFI image in fourier space
+    fx = fftfreq(reference_conv.shape[1])
+    fy = fftfreq(reference_conv.shape[0])
+
+    fxx, fyy = np.meshgrid(fx, fy)
+
+    arrayslices = []
+    for dimension_conv, dimension in zip(reference_conv.shape, reference.shape):
+        center = dimension_conv - (dimension_conv + 1) // 2
+        arrayslices += [center - dimension // 2, center + (dimension + 1) // 2]
+
     reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
-
+    
+    nanmask = np.isnan(reference)
     ref_masked = apply_mask(reference_conv, starmask, nanmask, edge=edge)
-
+    
+    if ref_masked.shape != convolved.shape:
+        convolved = apply_mask(convolved, starmask, nanmask, edge=edge)
+    
+    # import pdb
+    # pdb.set_trace()
     # plotting the results of the convolution
 
     fig = plt.figure(figsize=(16, 6))
@@ -410,12 +430,12 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
     ax2 = fig.add_subplot(gs[0, 1])
     ax3 = fig.add_subplot(gs[0, 2])
     ax1.set_title('MUSE')
-    ax2.set_title('WFI')
-    ax3.set_title('Diff')
+    ax2.set_title('Reference')
+    ax3.set_title('Ratio Img')
 
     # normalization for a better plot
     interval = vis.PercentileInterval(99.9)
-    vmin, vmax = interval.get_limits(convolved)
+    vmin, vmax = interval.get_limits(ref_masked)
     norm = vis.ImageNormalize(vmin=vmin, vmax=vmax,
                             stretch=vis.LogStretch(1000))
 
@@ -450,10 +470,12 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
         plt.show()
     else:
         plt.close()
+        
+    return(convolved, ref_masked)
 
 
 def run_measure_psf(data, reference, psf, star_pos, starmask, figname=None, alpha=2.8, edge=50, fwhm0=0.8, dx0=0, dy0=0,
-                    fit_alpha=False, plot=False, save=False, show=False, scale=0.2,
+                    fit_alpha=False, plot=True, save=False, show=False, scale=0.2,
                     offset=False, **kwargs):
     """
     Functions that performs the fit of the PSF.
@@ -551,9 +573,12 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, figname=None, alph
     if fit_alpha:
         print(f'Measured alpha = {best_fit[-1]:0.2f}')
 
+    # import pdb
+    # pdb.set_trace()
     if plot:
-        plot_results(best_fit, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, save=save, show=show,
-                     figname=figname, edge=edge, alpha0=alpha)
+        print('Plotting results completed')
+        plot_results(best_fit, convolved, reference, starmask,save=save, show=True,
+        figname=figname, edge=edge, alpha0=alpha)
 
     return res, star_pos, starmask
 
