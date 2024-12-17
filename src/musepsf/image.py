@@ -422,7 +422,7 @@ class Image:
         ax1.imshow(data, origin='lower')
         ax2.plot_surface(xx, yy, data)
 
-        if residual==None:
+        if residual is None:
             residual = np.zeros_like(data)
 
         ax3.imshow(residual, origin='lower')
