@@ -174,6 +174,7 @@ class Image:
         if pixscale is not None:
             print('Using MPDAF to resample the image')
             image = MPDAFImage(filename=os.path.join(self.input_dir, self.filename))
+            image.crop()
             scale = image.get_step() * 3600
             newdim_y = int(image.shape[0] * scale[0]//pixscale)
             newdim_x = int(image.shape[1] * scale[1]//pixscale)
@@ -292,6 +293,8 @@ class Image:
                 continue
             if not np.isfinite(zoom.data).all():
                 continue
+            if zoom.data.mask.sum() >= 5:
+                continue
             guess = np.unravel_index(zoom.data.argmax(), zoom.data.shape)
             # model = models.Gaussian2D(np.nanmax(zoom.data), x_mean=guess[1], y_mean=guess[0],
             #                           x_stddev=5, y_stddev=5)+models.Const2D(np.nanmean(zoom.data))
@@ -358,7 +361,7 @@ class Image:
                             format='ascii.no_header', overwrite=True)
         else:
             print(f'Using {stars_file}')
-            self.stars = ascii.read(stars_file, format='no_header', names=['x', 'y'])
+            self.stars = ascii.read(stars_file, format='no_header', names=['ra', 'dec'])
 
         coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
         stars_tbl = self.build_startable(coords, data, wcs)
@@ -422,7 +425,7 @@ class Image:
         ax1.imshow(data, origin='lower')
         ax2.plot_surface(xx, yy, data)
 
-        if residual==None:
+        if residual is None:
             residual = np.zeros_like(data)
 
         ax3.imshow(residual, origin='lower')

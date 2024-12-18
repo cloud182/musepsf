@@ -7,7 +7,7 @@ an adapted and simplified version of the procedure provided in [Bacon et al. 201
 
 ## Usage
 
-Inatallation:
+Installation:
 
 Clone this repository using `git clone https://github.com/cloud182/musepsf.git` and install it
 locally via `python -m pip install -e .`.
@@ -19,6 +19,3 @@ To see an exaple of how to use the package to measure the PSF of a MUSE image, p
 
 `musepsf` was created by Enrico Congiu. It is licensed under the terms of the MIT license.
 
-## Credits
-
-`musepsf` was created with [`cookiecutter`](https://cookiecutter.readthedocs.io/en/latest/) and the `py-pkgs-cookiecutter` [template](https://github.com/py-pkgs/py-pkgs-cookiecutter).
