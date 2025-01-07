@@ -148,19 +148,15 @@ class MUSEImage(Image):
             plot_images(self.data, reference.data, 'MUSE', 'Reference', outname,
                         save=save, show=show)
 
-        # apply a rotation to remove nans
-        # TBD
-        PA = kwargs.pop('pa', 0)
+        # get the rotation of the image
+        img_rot = self.get_rot()
 
-        if PA != 0:
-            print(f'Applying rotation of {PA} deg')
-            center = [self.data.shape[0] - (self.data.shape[0] + 1) // 2,
-                      self.data.shape[1] - (self.data.shape[1] + 1) // 2]
-
-            self.data = rotate(self.data, PA-90, prefilter=False, reshape=False)
-            self.data = self.data[center[0]-160:center[0]+161, center[1]-160: center[1]+161]
-            reference.data = rotate(reference.data, PA-90, prefilter=False, reshape=False)
-            reference.data = reference.data[center[0]-160:center[0]+161, center[1]-160: center[1]+161]
+        # apply rotation to the PSF
+        if img_rot != 0:
+            print(f'A rotation of {img_rot:0.1f} deg has been detected. Applying rotation to PSF')
+            psf = rotate(reference.psf, img_rot)
+        else:
+            psf = reference.psf
 
         # I need to know where the image is zero to erode the at before minimization
         zeromask = self.data == 0
@@ -204,8 +200,7 @@ class MUSEImage(Image):
 
 
         self.res, self.star_pos, self.starmask = run_measure_psf(data, reference.data,
-                                                                 reference.psf,
-                                                                 star_pos, starmask, zeromask,
+                                                                 psf, star_pos, starmask, zeromask,
                                                                  figname=figname,
                                                                  fit_alpha=fit_alpha,
                                                                  alpha=alpha, fwhm0=0.8,
@@ -346,7 +341,16 @@ class MUSEImage(Image):
                         save=save, show=show)
 
 
+    def get_rot(self):
 
+        # Extract the CD matrix
+        cd_matrix = self.wcs.pixel_scale_matrix  # This includes scaling if CD elements are used
+
+        # Compute the angle of the y-axis with respect to celestial north
+        theta_rad = np.arctan2(-cd_matrix[0, 1], cd_matrix[1, 1])  # Note the negative sign
+        theta_deg = theta_rad * 180 / np.pi
+
+        return theta_deg
 
 
 
