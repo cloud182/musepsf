@@ -162,6 +162,9 @@ class MUSEImage(Image):
             reference.data = rotate(reference.data, PA-90, prefilter=False, reshape=False)
             reference.data = reference.data[center[0]-160:center[0]+161, center[1]-160: center[1]+161]
 
+        # I need to know where the image is zero to erode the at before minimization
+        zeromask = self.data == 0
+
         # rescaling the flux
         self.check_flux_calibration(reference.data, plot=plot, save=save, show=show)
 
@@ -202,7 +205,7 @@ class MUSEImage(Image):
 
         self.res, self.star_pos, self.starmask = run_measure_psf(data, reference.data,
                                                                  reference.psf,
-                                                                 star_pos, starmask,
+                                                                 star_pos, starmask, zeromask,
                                                                  figname=figname,
                                                                  fit_alpha=fit_alpha,
                                                                  alpha=alpha, fwhm0=0.8,

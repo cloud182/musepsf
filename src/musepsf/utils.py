@@ -14,7 +14,7 @@ from astroquery.gaia import Gaia
 from photutils.detection import DAOStarFinder
 from astropy.convolution import convolve_fft
 from scipy.optimize import leastsq
-from scipy.ndimage import zoom
+from scipy.ndimage import zoom, binary_dilation
 from numpy.fft import fftfreq
 
 import spacepylot.alignment as spalign
@@ -226,7 +226,7 @@ def moffat_kernel(fwhm, alpha, scale=0.238, img_size=241):
     return moffat_k
 
 
-def apply_mask(image, starmask, nanmask, edge=5):
+def apply_mask(image, starmask, nanmask):
     """
     Apply the same starmask to 2 images of the same size
 
@@ -253,10 +253,7 @@ def apply_mask(image, starmask, nanmask, edge=5):
         assert starmask.shape == image.shape, 'Mask and image are of different shape'
         masked[starmask] = np.ma.masked
 
-    if edge != 0:
-        return masked[edge:-edge, edge:-edge]
-    else:
-        return masked
+    return masked
 
 
 def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, edge=50, alpha0=None,
@@ -332,7 +329,7 @@ def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arraysl
 
     reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
 
-    ref_masked = apply_mask(reference_conv, starmask, nanmask, edge=edge)
+    ref_masked = apply_mask(reference_conv, starmask, nanmask)
 
     # leastsq requires the array of residuals to be minimized
     function = (convolved-ref_masked)
@@ -400,7 +397,7 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
     reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
 
-    ref_masked = apply_mask(reference_conv, starmask, nanmask, edge=edge)
+    ref_masked = apply_mask(reference_conv, starmask, nanmask)
 
     # plotting the results of the convolution
 
@@ -413,24 +410,31 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
     ax2.set_title('WFI')
     ax3.set_title('Diff')
 
+    # compute limits for trimming empty area in plotting
+    conv_y = convolved.sum(axis=0)
+    conv_x = convolved.sum(axis=1)
+
+    [y0, y1] = np.ma.flatnotmasked_edges(conv_y)
+    [x0, x1] = np.ma.flatnotmasked_edges(conv_x)
+
     # normalization for a better plot
     interval = vis.PercentileInterval(99.9)
-    vmin, vmax = interval.get_limits(convolved)
+    vmin, vmax = interval.get_limits(convolved[y0:y1, x0:x1])
     norm = vis.ImageNormalize(vmin=vmin, vmax=vmax,
                             stretch=vis.LogStretch(1000))
 
     # MUSE image
-    img1 = ax1.imshow(convolved, norm=norm, origin='lower')
+    img1 = ax1.imshow(convolved[y0:y1, x0:x1], norm=norm, origin='lower')
     divider1 = make_axes_locatable(ax1)
     cax1 = divider1.append_axes('right', size='5%', pad=0.05)
 
     # WFI image
-    img2 = ax2.imshow(ref_masked, norm=norm, origin='lower')
+    img2 = ax2.imshow(ref_masked[y0:y1, x0:x1], norm=norm, origin='lower')
     divider2 = make_axes_locatable(ax2)
     cax2 = divider2.append_axes('right', size='5%', pad=0.05)
 
     # Difference image
-    img3 = ax3.matshow(convolved/ref_masked, vmin=0.8,
+    img3 = ax3.matshow(convolved[y0:y1, x0:x1]/ref_masked[y0:y1, x0:x1], vmin=0.8,
                     vmax=1.2, origin='lower')
     divider3 = make_axes_locatable(ax3)
     cax3 = divider3.append_axes('right', size='5%', pad=0.05)
@@ -452,9 +456,9 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
         plt.close()
 
 
-def run_measure_psf(data, reference, psf, star_pos, starmask, figname=None, alpha=2.8, edge=50, fwhm0=0.8, dx0=0, dy0=0,
-                    fit_alpha=False, plot=False, save=False, show=False, scale=0.2,
-                    offset=False, **kwargs):
+def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, figname=None, alpha=2.8,
+                    edge=50, fwhm0=0.8, dx0=0, dy0=0, fit_alpha=False, plot=False, save=False,
+                    show=False, scale=0.2, offset=False, **kwargs):
     """
     Functions that performs the fit of the PSF.
 
@@ -495,7 +499,11 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, figname=None, alph
             boolean mask selecting the pixels associated to stellar emission that should be masked.
     """
 
-    nanmask = np.isnan(data)
+    nanmask = np.isnan(data) + zeromask
+
+    if edge != 0:
+        strct_array = np.ones((2*edge+1, 2*edge+1), dtype=bool)
+        nanmask = binary_dilation(nanmask, structure=strct_array)
 
     # computing things to perform the minimization more efficiently
     # creating model of MUSE PSF
@@ -515,7 +523,7 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, figname=None, alph
 
 
     convolved = convolve_fft(data, psf)
-    convolved = apply_mask(convolved, starmask, nanmask, edge=edge)
+    convolved = apply_mask(convolved, starmask, nanmask)
 
     print(f'Using alpha = {alpha}')
 
