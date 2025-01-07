@@ -187,11 +187,18 @@ class MUSEImage(Image):
 
         reg_name = os.path.join(self.region_dir, self.filename.replace('.fits', '_regions.reg'))
 
-        if os.path.isfile(reg_name):
-            print('Including manually selected sources')
-            star_pos, starmask = locate_stars(data, filename=reg_name, **kwargs)
+        mask_stars = kwargs.pop('mask_stars', True)
+
+        if mask_stars:
+            if os.path.isfile(reg_name):
+                print('Including manually selected sources')
+                star_pos, starmask = locate_stars(data, filename=reg_name, **kwargs)
+            else:
+                star_pos, starmask = locate_stars(data, filename=None, **kwargs)
         else:
-            star_pos, starmask = locate_stars(data, filename=None, **kwargs)
+            star_pos = []
+            starmask = np.zeros(data.shape, dtype=bool)
+
 
         self.res, self.star_pos, self.starmask = run_measure_psf(data, reference.data,
                                                                  reference.psf,
