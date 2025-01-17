@@ -14,7 +14,7 @@ from astroquery.gaia import Gaia
 from photutils.detection import DAOStarFinder
 from astropy.convolution import convolve_fft
 from scipy.optimize import leastsq
-from scipy.ndimage import zoom, binary_dilation
+from scipy.ndimage import zoom, binary_dilation, binary_fill_holes
 from numpy.fft import fftfreq
 
 import spacepylot.alignment as spalign
@@ -256,7 +256,7 @@ def apply_mask(image, starmask, nanmask):
     return masked
 
 
-def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, edge=50, alpha0=None,
+def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, oversample, alpha0=None,
                 fwhm_bound=[0.4, 2], alpha_bound=[1, 10], dd_bound=[-2, 2], scale=0.2):
     """
     Compute the function to be minimize to measure the PSF properties
@@ -321,7 +321,7 @@ def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arraysl
 
 
     # creating model of MUSE PSF
-    ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=50)
+    ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=50*oversample)
 
     # convolving WFI image for the model of MUSE PSF
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
@@ -348,7 +348,7 @@ def apply_offset_fourier(convolved, dx, dy, fxx, fyy, arrayslices):
 
 
 
-def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, figname, save=False, show=False,
+def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, figname, oversample, save=False, show=False,
                  edge=50, alpha0=None, scale=0.2):
     """
     Functions that plot the final results of the PSF fitting
@@ -391,7 +391,7 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
         fwhm, dx, dy, alpha = pars
 
     # creating model of MUSE PSF
-    ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=50)
+    ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=50*oversample)
 
     # convolving WFI image for the model of MUSE PSF
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
@@ -448,6 +448,7 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
     fig.colorbar(img1, cax=cax1)
     fig.colorbar(img2, cax=cax2)
     fig.colorbar(img3, cax=cax3)
+    plt.tight_layout()
     if save:
         plt.savefig(figname, dpi=150)
     if show:
@@ -456,7 +457,7 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
         plt.close()
 
 
-def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, figname=None, alpha=2.8,
+def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversample, figname=None, alpha=2.8,
                     edge=50, fwhm0=0.8, dx0=0, dy0=0, fit_alpha=False, plot=False, save=False,
                     show=False, scale=0.2, offset=False, **kwargs):
     """
@@ -499,15 +500,25 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, figname=
             boolean mask selecting the pixels associated to stellar emission that should be masked.
     """
 
+    # filling eventual holes in the masks caused by the resampling
+    zeromask = binary_fill_holes(zeromask)
+    starmask = binary_fill_holes(starmask)
+
     nanmask = np.isnan(data) + zeromask
+    # set the edges to zero
+    nanmask[0, :] = True
+    nanmask[-1, :] = True
+    nanmask[:, 0] = True
+    nanmask[:, -1] = True
 
     if edge != 0:
         strct_array = np.ones((2*edge+1, 2*edge+1), dtype=bool)
-        nanmask = binary_dilation(nanmask, structure=strct_array)
+        for _ in range(oversample):
+            nanmask = binary_dilation(nanmask, structure=strct_array)
 
     # computing things to perform the minimization more efficiently
     # creating model of MUSE PSF
-    ker_MUSE = moffat_kernel(1, 2.8, scale=scale, img_size=50)
+    ker_MUSE = moffat_kernel(1, 2.8, scale=scale, img_size=50*oversample)
     # convolving WFI image for the model of MUSE PSF
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
 
@@ -521,7 +532,6 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, figname=
         center = dimension_conv - (dimension_conv + 1) // 2
         arrayslices += [center - dimension // 2, center + (dimension + 1) // 2]
 
-
     convolved = convolve_fft(data, psf)
     convolved = apply_mask(convolved, starmask, nanmask)
 
@@ -530,7 +540,7 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, figname=
     print('Performing the fit')
     fwhm_bound = kwargs.get('fwhm_bound', [0.2, 2])
     alpha_bound = kwargs.get('alpha_bound', [1, 10])
-    dd_bound = kwargs.get('dd_bound', [-2, 2])
+    dd_bound = kwargs.get('dd_bound', [-2*oversample, 2*oversample])
     # it is possible to fit the alpha parameter or to assume a fixed value
     if offset:
         if fit_alpha:
@@ -546,7 +556,7 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, figname=
     res = leastsq(to_minimize, x0=p0,
                 #convolved, reference, starmask, edge, alpha0, fwhm_bound,
                 # alpha_bound, scale
-                args=(convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, edge, alpha, fwhm_bound,
+                args=(convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, oversample, alpha, fwhm_bound,
                         alpha_bound, dd_bound, scale),
                 maxfev=600, xtol=1e-9, full_output=True)
 
@@ -560,8 +570,8 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, figname=
         print(f'Measured alpha = {best_fit[-1]:0.2f}')
 
     if plot:
-        plot_results(best_fit, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, save=save, show=show,
-                     figname=figname, edge=edge, alpha0=alpha)
+        plot_results(best_fit, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, oversample=oversample,
+                     save=save, show=show, figname=figname, edge=edge, alpha0=alpha)
 
     return res, star_pos, starmask
 

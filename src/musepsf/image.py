@@ -210,7 +210,7 @@ class Image:
             pixel_region.plot()
             plt.show()
 
-    def get_gaia_catalog(self, center, gmin, gmax, radius=10*u.arcmin, save=True, show=False):
+    def get_gaia_catalog(self, center, gmin, gmax, radius=10*u.arcmin):
         """
         Query the Gaia Catalog to identify stars in the field of the galaxy.
 
@@ -239,29 +239,14 @@ class Image:
             mask2 = self.galaxy.contains(coords, wcs=self.wcs)
 
         gaia_cat = gaia_cat[inside*(~mask2)].copy()
+
+        # remove stars not in the actual image.
+
         self.stars = gaia_cat
 
-        # plotting some diagnostics results
-        fig, ax = plt.subplots(1, 1, figsize=(14, 14), subplot_kw={'projection': self.wcs})
-        norm = simple_norm(self.data, 'log', percent=99.9)
-        ax.imshow(self.data, norm=norm)
-        ax.scatter(self.stars['ra'], self.stars['dec'], transform=ax.get_transform('world'),
-                   s=80, facecolors='none', edgecolors='r')
-        pixel_region = self.galaxy.to_pixel(self.wcs)
-        pixel_region.plot(ax=ax)
-        ax.set_xlabel('RA')
-        ax.set_ylabel('Dec')
-        if save:
-            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.png'))
-            plt.savefig(outname, dpi=300)
-        if show:
-            plt.show()
-        else:
-            plt.close()
 
 
-
-    def build_startable(self, coords, data, wcs):
+    def build_startable(self, coords, data, wcs, save=True, show=False):
 
         """
         Refine the position of the stars and build the star table that will be feed to the
@@ -281,6 +266,7 @@ class Image:
         """
 
         x, y = [], []
+        xplt, yplt = [], []
 
         # fitter = fitting.LevMarLSQFitter()
 
@@ -313,9 +299,33 @@ class Image:
             x.append(newpix[0])
             y.append(newpix[1])
 
+            # in the original frame, just for plotting
+            newpix_plot = self.wcs.world_to_pixel(newcoord)
+            xplt.append(newpix_plot[0])
+            yplt.append(newpix_plot[1])
+
+
         stars_tbl = Table()
         stars_tbl['x'] = x
         stars_tbl['y'] = y
+
+        # plotting some diagnostics results
+        fig, ax = plt.subplots(1, 1, figsize=(14, 14), subplot_kw={'projection': self.wcs})
+        norm = simple_norm(self.data, 'log', percent=99.9)
+        ax.imshow(self.data, norm=norm)
+        ax.scatter(xplt, yplt, s=80, facecolors='none', edgecolors='r')
+        pixel_region = self.galaxy.to_pixel(self.wcs)
+        pixel_region.plot(ax=ax)
+        ax.set_xlabel('RA')
+        ax.set_ylabel('Dec')
+        if save:
+            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.png'))
+            plt.savefig(outname, dpi=300)
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
 
         return stars_tbl
 
@@ -364,7 +374,7 @@ class Image:
             self.stars = ascii.read(stars_file, format='no_header', names=['ra', 'dec'])
 
         coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
-        stars_tbl = self.build_startable(coords, data, wcs)
+        stars_tbl = self.build_startable(coords, data, wcs, save=save, show=show)
 
         nddata = NDData(data=data)
         stars = extract_stars(nddata, stars_tbl, size=npix)
