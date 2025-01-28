@@ -1,6 +1,13 @@
 # Changelog
 
 <!--next-version-placeholder-->
+## v0.4.0 (28/01/2025)
+
+- several bug fixes
+
+## v0.4.0 (17/01/2025)
+
+- adding possibility to oversample images before computing PSF for MUSE
 
 ## v0.3.0 (11/04/2023)
 

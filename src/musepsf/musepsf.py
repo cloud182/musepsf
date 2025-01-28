@@ -9,7 +9,7 @@ from .image import Image
 
 import os
 
-from .utils import plot_images, bin_image, linear_function, run_measure_psf, run_spacepylot, locate_stars
+from .utils import plot_images, bin_image, linear_function, run_measure_psf, run_spacepylot, locate_stars, plot_psf
 
 
 class MUSEImage(Image):
@@ -184,7 +184,8 @@ class MUSEImage(Image):
                 star_pos, starmask = locate_stars(data, filename=reg_name, **kwargs)
             else:
                 star_pos, starmask = locate_stars(data, filename=None, **kwargs)
-                star_pos.write(reg_name, format='ascii.no_header')
+                if star_pos is not None:
+                    star_pos.write(reg_name, format='ascii.no_header')
         else:
             star_pos = None
             starmask = np.zeros(data.shape, dtype=bool)
@@ -206,8 +207,12 @@ class MUSEImage(Image):
             ref_data = zoom(reference.data, zoom=oversample)/oversample**2
             psf = zoom(psf, zoom=oversample)
             psf /= psf.sum()
-            starmask = zoom(starmask, zoom=oversample, order=0)
-            zeromask = data == 0
+
+            plot_psf(psf, self.output_dir, self.filename, suffix='_oversampled')
+
+            if starmask is not None:
+                starmask = zoom(starmask, zoom=oversample, order=0)
+            zeromask = zoom(zeromask, zoom=oversample, order=0)
             scale = self.scale/oversample
             if star_pos is not None:
                 star_pos['xcentroid'] * oversample

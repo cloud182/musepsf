@@ -22,7 +22,7 @@ from mpdaf.obj import Image as MPDAFImage
 import sys
 import os
 
-from .utils import query_gaia, create_sdss_psf
+from .utils import query_gaia, create_sdss_psf, plot_psf
 
 class Image:
     """
@@ -108,6 +108,7 @@ class Image:
                 self.main_header = hdu[headerhdu].header
             else:
                 self.main_header = None
+            self.data = np.nan_to_num(self.data, nan=0, posinf=0, neginf=0)
 
         self.wcs = WCS(self.header)
         if units is None:
@@ -408,7 +409,7 @@ class Image:
         else:
             sys.exit('No stars were used for the fit.')
 
-        self.plot_psf(new_psf.data, residual=residual, save=save, show=show)
+        plot_psf(new_psf.data, self.output_dir, self.filename, residual=residual, save=save, show=show)
 
         # saving the ePSF as a fits file, making sure it is normalized to 1
 
@@ -424,31 +425,7 @@ class Image:
         hdu.writeto(out, overwrite=True)
 
 
-    def plot_psf(self, data, residual=None, save=True, show=False):
-      # plotting some diagnostics results
-        fig = plt.figure(figsize=(14, 6))
-        gs = fig.add_gridspec(1, 3)
-        ax1 = fig.add_subplot(gs[0, 0])
-        ax2 = fig.add_subplot(gs[0, 1], projection='3d')
-        ax3 = fig.add_subplot(gs[0, 2])
-        xx, yy = np.indices(data.shape)
-        ax1.imshow(data, origin='lower')
-        ax2.plot_surface(xx, yy, data)
 
-        if residual is None:
-            residual = np.zeros_like(data)
-
-        ax3.imshow(residual, origin='lower')
-        ax1.set_title('PSF')
-        ax2.set_title('PSF - 3D')
-        ax3.set_title('Residuals')
-        if save:
-            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.png'))
-            plt.savefig(outname, dpi=300)
-        if show:
-            plt.show()
-        else:
-            plt.close()
 
     def recover_SDSS_PSF(self, save=True, show=False, pixscale=0.2):
 
@@ -475,7 +452,7 @@ class Image:
 
         hdu.header['PSFSCALE'] = self.psfscale
 
-        self.plot_psf(new_psf, residual=None, save=save, show=show)
+        plot_psf(new_psf, self.output_dir, self.filename.replace('.fits', '.psf.png'), residual=None, save=save, show=show)
 
         out = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.fits'))
         hdu.writeto(out, overwrite=True)

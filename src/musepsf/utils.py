@@ -456,7 +456,6 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
     else:
         plt.close()
 
-
 def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversample, figname=None, alpha=2.8,
                     edge=50, fwhm0=0.8, dx0=0, dy0=0, fit_alpha=False, plot=False, save=False,
                     show=False, scale=0.2, offset=False, **kwargs):
@@ -502,7 +501,8 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
 
     # filling eventual holes in the masks caused by the resampling
     zeromask = binary_fill_holes(zeromask)
-    starmask = binary_fill_holes(starmask)
+    if starmask is not None:
+        starmask = binary_fill_holes(starmask)
 
     nanmask = np.isnan(data) + zeromask
     # set the edges to zero
@@ -518,6 +518,8 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
 
     # computing things to perform the minimization more efficiently
     # creating model of MUSE PSF
+    # I need this to make sure I create the fxx and fyy correctly.
+    # maybe it could be removed?
     ker_MUSE = moffat_kernel(1, 2.8, scale=scale, img_size=50*oversample)
     # convolving WFI image for the model of MUSE PSF
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
@@ -695,3 +697,30 @@ def create_sdss_psf(data, hdr, out_dir, pixscale=0.2, sdss_pixscale=0.396):
     psf = np.mean(PSFs, axis=0)
 
     return psf
+
+
+def plot_psf(data, output_dir, filename, residual=None, save=True, show=False, suffix=''):
+    # plotting some diagnostics results
+    fig = plt.figure(figsize=(14, 6))
+    gs = fig.add_gridspec(1, 3)
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax2 = fig.add_subplot(gs[0, 1], projection='3d')
+    ax3 = fig.add_subplot(gs[0, 2])
+    xx, yy = np.indices(data.shape)
+    ax1.imshow(data, origin='lower')
+    ax2.plot_surface(xx, yy, data)
+
+    if residual is None:
+        residual = np.zeros_like(data)
+
+    ax3.imshow(residual, origin='lower')
+    ax1.set_title('PSF')
+    ax2.set_title('PSF - 3D')
+    ax3.set_title('Residuals')
+    if save:
+        outname = os.path.join(output_dir, filename.replace('.fits', f'{suffix}.psf.png'))
+        plt.savefig(outname, dpi=300)
+    if show:
+        plt.show()
+    else:
+        plt.close()
