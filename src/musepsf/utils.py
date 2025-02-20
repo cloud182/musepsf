@@ -510,6 +510,8 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
     zeromask = binary_fill_holes(zeromask)
     if starmask is not None:
         starmask = binary_fill_holes(starmask)
+    else:
+        starmask = np.zeros_like(zeromask)
 
 
     # set the edges to zero
