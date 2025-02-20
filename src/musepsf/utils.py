@@ -218,7 +218,9 @@ def moffat_kernel(fwhm, alpha, scale=0.238, img_size=241):
         astropy.convolution.kernels.Moffat2DKernel:
             Moffat kernel
     """
+    print(fwhm, scale)
     fwhm = fwhm / scale
+    print(fwhm)
     gamma = fwhm/(2*np.sqrt(2**(1/alpha)-1))
 
     moffat_k = Moffat2DKernel(gamma, alpha, x_size=img_size, y_size=img_size)
@@ -329,6 +331,11 @@ def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arraysl
 
     reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
 
+    reference_conv = rebin(reference_conv, oversample)
+
+    assert reference_conv.shape == starmask.shape, 'Starmask and reference_conv have different shapes'
+    assert reference_conv.shape == convolved.shape, 'Convolved and reference_conv have different shapes'
+
     ref_masked = apply_mask(reference_conv, starmask, nanmask)
 
     # leastsq requires the array of residuals to be minimized
@@ -396,6 +403,8 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
     # convolving WFI image for the model of MUSE PSF
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
     reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
+
+    reference_conv = rebin(reference_conv, oversample)
 
     ref_masked = apply_mask(reference_conv, starmask, nanmask)
 
@@ -504,17 +513,17 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
     if starmask is not None:
         starmask = binary_fill_holes(starmask)
 
-    nanmask = np.isnan(data) + zeromask
+
     # set the edges to zero
-    nanmask[0, :] = True
-    nanmask[-1, :] = True
-    nanmask[:, 0] = True
-    nanmask[:, -1] = True
+    zeromask[0, :] = True
+    zeromask[-1, :] = True
+    zeromask[:, 0] = True
+    zeromask[:, -1] = True
 
     if edge != 0:
         strct_array = np.ones((2*edge+1, 2*edge+1), dtype=bool)
-        for _ in range(oversample):
-            nanmask = binary_dilation(nanmask, structure=strct_array)
+        # for _ in range(oversample):
+        zeromask = binary_dilation(zeromask, structure=strct_array)
 
     # computing things to perform the minimization more efficiently
     # creating model of MUSE PSF
@@ -535,7 +544,12 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
         arrayslices += [center - dimension // 2, center + (dimension + 1) // 2]
 
     convolved = convolve_fft(data, psf)
-    convolved = apply_mask(convolved, starmask, nanmask)
+
+    convolved = rebin(convolved, oversample)
+
+    assert convolved.shape == starmask.shape, 'Convolved and starmask have different shapes'
+
+    convolved = apply_mask(convolved, starmask, zeromask)
 
     print(f'Using alpha = {alpha}')
 
@@ -558,7 +572,7 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
     res = leastsq(to_minimize, x0=p0,
                 #convolved, reference, starmask, edge, alpha0, fwhm_bound,
                 # alpha_bound, scale
-                args=(convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, oversample, alpha, fwhm_bound,
+                args=(convolved, reference, starmask, zeromask, fxx, fyy, arrayslices, oversample, alpha, fwhm_bound,
                         alpha_bound, dd_bound, scale),
                 maxfev=600, xtol=1e-9, full_output=True)
 
@@ -572,7 +586,7 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
         print(f'Measured alpha = {best_fit[-1]:0.2f}')
 
     if plot:
-        plot_results(best_fit, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, oversample=oversample,
+        plot_results(best_fit, convolved, reference, starmask, zeromask, fxx, fyy, arrayslices, oversample=oversample,
                      save=save, show=show, figname=figname, edge=edge, alpha0=alpha)
 
     return res, star_pos, starmask
@@ -724,3 +738,10 @@ def plot_psf(data, output_dir, filename, residual=None, save=True, show=False, s
         plt.show()
     else:
         plt.close()
+
+
+def rebin(image, factor):
+
+    shape = (image.shape[0] // factor, factor, image.shape[1] // factor, factor)
+    newimage = image.reshape(shape).mean(axis=(1, 3))
+    return newimage
