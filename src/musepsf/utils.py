@@ -218,9 +218,7 @@ def moffat_kernel(fwhm, alpha, scale=0.238, img_size=241):
         astropy.convolution.kernels.Moffat2DKernel:
             Moffat kernel
     """
-    print(fwhm, scale)
     fwhm = fwhm / scale
-    print(fwhm)
     gamma = fwhm/(2*np.sqrt(2**(1/alpha)-1))
 
     moffat_k = Moffat2DKernel(gamma, alpha, x_size=img_size, y_size=img_size)
