@@ -22,7 +22,7 @@ from mpdaf.obj import Image as MPDAFImage
 import sys
 import os
 
-from .utils import query_gaia, create_sdss_psf
+from .utils import query_gaia, create_sdss_psf, plot_psf
 
 class Image:
     """
@@ -108,6 +108,7 @@ class Image:
                 self.main_header = hdu[headerhdu].header
             else:
                 self.main_header = None
+            self.data = np.nan_to_num(self.data, nan=0, posinf=0, neginf=0)
 
         self.wcs = WCS(self.header)
         if units is None:
@@ -210,7 +211,7 @@ class Image:
             pixel_region.plot()
             plt.show()
 
-    def get_gaia_catalog(self, center, gmin, gmax, radius=10*u.arcmin, save=True, show=False):
+    def get_gaia_catalog(self, center, gmin, gmax, radius=10*u.arcmin):
         """
         Query the Gaia Catalog to identify stars in the field of the galaxy.
 
@@ -239,29 +240,14 @@ class Image:
             mask2 = self.galaxy.contains(coords, wcs=self.wcs)
 
         gaia_cat = gaia_cat[inside*(~mask2)].copy()
+
+        # remove stars not in the actual image.
+
         self.stars = gaia_cat
 
-        # plotting some diagnostics results
-        fig, ax = plt.subplots(1, 1, figsize=(14, 14), subplot_kw={'projection': self.wcs})
-        norm = simple_norm(self.data, 'log', percent=99.9)
-        ax.imshow(self.data, norm=norm)
-        ax.scatter(self.stars['ra'], self.stars['dec'], transform=ax.get_transform('world'),
-                   s=80, facecolors='none', edgecolors='r')
-        pixel_region = self.galaxy.to_pixel(self.wcs)
-        pixel_region.plot(ax=ax)
-        ax.set_xlabel('RA')
-        ax.set_ylabel('Dec')
-        if save:
-            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.png'))
-            plt.savefig(outname, dpi=300)
-        if show:
-            plt.show()
-        else:
-            plt.close()
 
 
-
-    def build_startable(self, coords, data, wcs):
+    def build_startable(self, coords, data, wcs, save=True, show=False):
 
         """
         Refine the position of the stars and build the star table that will be feed to the
@@ -281,6 +267,7 @@ class Image:
         """
 
         x, y = [], []
+        xplt, yplt = [], []
 
         # fitter = fitting.LevMarLSQFitter()
 
@@ -313,9 +300,33 @@ class Image:
             x.append(newpix[0])
             y.append(newpix[1])
 
+            # in the original frame, just for plotting
+            newpix_plot = self.wcs.world_to_pixel(newcoord)
+            xplt.append(newpix_plot[0])
+            yplt.append(newpix_plot[1])
+
+
         stars_tbl = Table()
         stars_tbl['x'] = x
         stars_tbl['y'] = y
+
+        # plotting some diagnostics results
+        fig, ax = plt.subplots(1, 1, figsize=(14, 14), subplot_kw={'projection': self.wcs})
+        norm = simple_norm(self.data, 'log', percent=99.9)
+        ax.imshow(self.data, norm=norm)
+        ax.scatter(xplt, yplt, s=80, facecolors='none', edgecolors='r')
+        pixel_region = self.galaxy.to_pixel(self.wcs)
+        pixel_region.plot(ax=ax)
+        ax.set_xlabel('RA')
+        ax.set_ylabel('Dec')
+        if save:
+            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.png'))
+            plt.savefig(outname, dpi=300)
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
 
         return stars_tbl
 
@@ -364,7 +375,7 @@ class Image:
             self.stars = ascii.read(stars_file, format='no_header', names=['ra', 'dec'])
 
         coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
-        stars_tbl = self.build_startable(coords, data, wcs)
+        stars_tbl = self.build_startable(coords, data, wcs, save=save, show=show)
 
         nddata = NDData(data=data)
         stars = extract_stars(nddata, stars_tbl, size=npix)
@@ -398,11 +409,12 @@ class Image:
         else:
             sys.exit('No stars were used for the fit.')
 
-        self.plot_psf(new_psf.data, residual=residual, save=save, show=show)
+        plot_psf(new_psf.data, self.output_dir, self.filename, residual=residual/np.max(new_psf.data), save=save, show=show)
 
         # saving the ePSF as a fits file, making sure it is normalized to 1
 
         psf_flux = np.sum(new_psf.data)
+        print(psf_flux)
         if np.abs(1-psf_flux) < 0.0001:
             hdu = fits.PrimaryHDU(new_psf.data)
             self.psf = new_psf.data
@@ -414,31 +426,7 @@ class Image:
         hdu.writeto(out, overwrite=True)
 
 
-    def plot_psf(self, data, residual=None, save=True, show=False):
-      # plotting some diagnostics results
-        fig = plt.figure(figsize=(14, 6))
-        gs = fig.add_gridspec(1, 3)
-        ax1 = fig.add_subplot(gs[0, 0])
-        ax2 = fig.add_subplot(gs[0, 1], projection='3d')
-        ax3 = fig.add_subplot(gs[0, 2])
-        xx, yy = np.indices(data.shape)
-        ax1.imshow(data, origin='lower')
-        ax2.plot_surface(xx, yy, data)
 
-        if residual is None:
-            residual = np.zeros_like(data)
-
-        ax3.imshow(residual, origin='lower')
-        ax1.set_title('PSF')
-        ax2.set_title('PSF - 3D')
-        ax3.set_title('Residuals')
-        if save:
-            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.png'))
-            plt.savefig(outname, dpi=300)
-        if show:
-            plt.show()
-        else:
-            plt.close()
 
     def recover_SDSS_PSF(self, save=True, show=False, pixscale=0.2):
 
@@ -465,7 +453,7 @@ class Image:
 
         hdu.header['PSFSCALE'] = self.psfscale
 
-        self.plot_psf(new_psf, residual=None, save=save, show=show)
+        plot_psf(new_psf, self.output_dir, self.filename.replace('.fits', '.psf.png'), residual=None, save=save, show=show)
 
         out = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.fits'))
         hdu.writeto(out, overwrite=True)

@@ -3,13 +3,13 @@ import astropy.units as u
 import matplotlib.pyplot as plt
 
 
-from scipy.ndimage import rotate
+from scipy.ndimage import rotate, zoom
 from scipy.odr import ODR, Model, RealData
 from .image import Image
 
 import os
 
-from .utils import plot_images, bin_image, linear_function, run_measure_psf, run_spacepylot, locate_stars
+from .utils import plot_images, bin_image, linear_function, run_measure_psf, run_spacepylot, locate_stars, plot_psf, rebin
 
 
 class MUSEImage(Image):
@@ -115,7 +115,7 @@ class MUSEImage(Image):
 
 
     def measure_psf(self, reference: Image, fit_alpha=False, plot=False, spacepylot=False,
-                    save=False, show=True, offset=False, optimize=False, **kwargs):
+                    save=False, show=True, offset=False, optimize=False, oversample=None, **kwargs):
         """
         Measure the PSF of the image by using a cross-convolution technique to compare the
         MUSE image to a reference image with known PSF.
@@ -148,17 +148,7 @@ class MUSEImage(Image):
             plot_images(self.data, reference.data, 'MUSE', 'Reference', outname,
                         save=save, show=show)
 
-        # get the rotation of the image
-        img_rot = self.get_rot()
-
-        # apply rotation to the PSF
-        if img_rot != 0:
-            print(f'A rotation of {img_rot:0.1f} deg has been detected. Applying rotation to PSF')
-            psf = rotate(reference.psf, img_rot)
-        else:
-            psf = reference.psf
-
-        # I need to know where the image is zero to erode the at before minimization
+        # I need to know where the image is zero to erode it before minimization
         zeromask = self.data == 0
 
         # rescaling the flux
@@ -174,7 +164,7 @@ class MUSEImage(Image):
         edge = kwargs.pop('edge', 50)
         dx0 = kwargs.pop('dx0', 0)
         dy0 = kwargs.pop('dy0', 0)
-
+        fwhm0 = kwargs.pop('fwhm0', 0.8)
         # realign with spacepylot, works as first guesses for loop
         if spacepylot:
             data, rotation, translation = run_spacepylot(self.data, reference.data,
@@ -194,18 +184,54 @@ class MUSEImage(Image):
                 star_pos, starmask = locate_stars(data, filename=reg_name, **kwargs)
             else:
                 star_pos, starmask = locate_stars(data, filename=None, **kwargs)
+                if star_pos is not None:
+                    star_pos.write(reg_name, format='ascii.no_header')
         else:
-            star_pos = []
+            star_pos = None
             starmask = np.zeros(data.shape, dtype=bool)
 
 
-        self.res, self.star_pos, self.starmask = run_measure_psf(data, reference.data,
+        # get the rotation of the image
+        img_rot = self.get_rot()
+
+        # apply rotation to the PSF
+        if img_rot != 0:
+            print(f'A rotation of {img_rot:0.1f} deg has been detected. Applying rotation to PSF')
+            psf = rotate(reference.psf, img_rot)
+        else:
+            psf = reference.psf
+
+        if oversample is not None and oversample > 1:
+            data[np.isnan(data)] = 0
+            data = zoom(data, zoom=oversample)/oversample**2
+            ref_data = zoom(reference.data, zoom=oversample)/oversample**2
+            psf = zoom(psf, zoom=oversample)
+            psf /= psf.sum()
+
+            plot_psf(psf, self.output_dir, self.filename, suffix='_oversampled')
+
+            scale = self.scale/oversample
+
+            # I am keeping the masks at the original sampling.
+
+            # if starmask is not None:
+            #     starmask = zoom(starmask, zoom=oversample, order=0)
+            # zeromask = zoom(zeromask, zoom=oversample, order=0)
+            # if star_pos is not None:
+            #     star_pos['xcentroid'] * oversample
+            #     star_pos['ycentroid'] * oversample
+        else:
+            ref_data = reference.data
+            scale = self.scale
+            oversample = 1
+
+        self.res, self.star_pos, self.starmask = run_measure_psf(data, ref_data,
                                                                  psf, star_pos, starmask, zeromask,
-                                                                 figname=figname,
+                                                                 oversample, figname=figname,
                                                                  fit_alpha=fit_alpha,
-                                                                 alpha=alpha, fwhm0=0.8,
+                                                                 alpha=alpha, fwhm0=fwhm0,
                                                                  offset=offset,
-                                                                 scale=self.scale,
+                                                                 scale=scale,
                                                                  plot=plot, save=save,
                                                                  edge=edge, dx0=dx0, dy0=dy0,
                                                                  **kwargs)
