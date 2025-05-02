@@ -9,7 +9,7 @@ from .image import Image
 
 import os
 
-from .utils import plot_images, bin_image, linear_function, run_measure_psf, run_spacepylot, locate_stars, plot_psf, rebin
+from .utils import plot_images, bin_image, linear_function, run_measure_psf, locate_stars, plot_psf, rebin
 
 
 class MUSEImage(Image):
@@ -114,8 +114,8 @@ class MUSEImage(Image):
             os.makedirs(self.region_dir)
 
 
-    def measure_psf(self, reference: Image, fit_alpha=False, plot=False, spacepylot=False,
-                    save=False, show=True, offset=False, optimize=False, oversample=None, **kwargs):
+    def measure_psf(self, reference: Image, fit_alpha=False, plot=False, save=False, show=True,
+                    offset=False, oversample=None, **kwargs):
         """
         Measure the PSF of the image by using a cross-convolution technique to compare the
         MUSE image to a reference image with known PSF.
@@ -135,6 +135,10 @@ class MUSEImage(Image):
                 If True, the plots will be saved. Defaults to False.
             show (bool, optional):
                 If True, the plots will be shown. Defaults to True.
+            offset (bool, optional):
+                If True, fit an additional offset between the two images. Defaults to False.
+            oversample (int, optional):
+                If not None, the image will be oversampled by this factor. Defaults to None.
         """
 
         assert self.units == reference.units, 'The two images are not in the same units'
@@ -166,13 +170,7 @@ class MUSEImage(Image):
         dy0 = kwargs.pop('dy0', 0)
         fwhm0 = kwargs.pop('fwhm0', 0.8)
         # realign with spacepylot, works as first guesses for loop
-        if spacepylot:
-            data, rotation, translation = run_spacepylot(self.data, reference.data,
-                                                         verbose=True, **kwargs)
-            self.rotation = rotation
-            self.translation = translation
-        else:
-            data = self.data
+        data = self.data
 
         reg_name = os.path.join(self.region_dir, self.filename.replace('.fits', '_regions.reg'))
 
@@ -211,15 +209,6 @@ class MUSEImage(Image):
             plot_psf(psf, self.output_dir, self.filename, suffix='_oversampled')
 
             scale = self.scale/oversample
-
-            # I am keeping the masks at the original sampling.
-
-            # if starmask is not None:
-            #     starmask = zoom(starmask, zoom=oversample, order=0)
-            # zeromask = zoom(zeromask, zoom=oversample, order=0)
-            # if star_pos is not None:
-            #     star_pos['xcentroid'] * oversample
-            #     star_pos['ycentroid'] * oversample
         else:
             ref_data = reference.data
             scale = self.scale
@@ -239,64 +228,6 @@ class MUSEImage(Image):
 
 
 
-        if optimize:
-            print('Optimizing PSF and Offsets')
-
-            fwhm = self.best_fit[0]
-            dfwhm = fwhm
-
-            # initializing differently dx and dy if they have been already fitted or not
-            if offset:
-                dx, dy = self.best_fit[1], self.best_fit[2]
-            else:
-                dx, dy = 0.5 , 0.5
-
-            if fit_alpha:
-                alpha = self.best_fit[-1]
-                dalpha = alpha
-            else:
-                dalpha = 0.01
-
-            i=0
-
-            while dfwhm > 0.1 or np.abs(dx) > 0.1 or np.abs(dy) > 0.1 or dalpha > 0.1:
-                if i>5:
-                    print('Iteration limit reached')
-                    break
-                print(f'\nOptimizing with fwhm: {fwhm:0.2f}, dx: {dx:0.2f}, dy: {dy:0.2f}')
-                rot_old = rotation
-                tran_old = translation
-                fwhm_old = fwhm
-                alpha_old = alpha
-                data, rotation, translation = run_spacepylot(self.data, reference.data,
-                                                             fwhm=fwhm_old, psf=reference.psf,
-                                                             alpha=alpha_old)
-
-                res = run_measure_psf(data, reference.data,
-                                      reference.psf, figname, fit_alpha=fit_alpha,
-                                      alpha=alpha_old, fwhm0=fwhm_old,
-                                      offset=False,
-                                      scale=self.scale,
-                                      plot=True, save=True,
-                                      edge=edge, dx0=0, dy0=0)[0]
-
-                fwhm = res[0][0]
-                dx, dy = np.abs(translation - tran_old)
-                dfwhm = np.abs(fwhm_old - fwhm)
-                dalpha = np.abs(alpha_old - alpha)
-                print(f'Iteration - fwhm: {dfwhm:0.2f}, dd: {translation}, rot: {rotation:0.4e}, alpha: {dalpha:0.2f}')
-
-                i+=1
-
-            print(f'Final values - fwhm: {fwhm:0.2f}, alpha: {alpha}, rot: {rotation:0.4e}, dd: {translation}')
-
-            self.res = res
-            self.best_fit = [fwhm, alpha]
-            self.rotation = rotation
-            self.translation = translation
-
-
-
     def check_flux_calibration(self, reference, bin_size=15, plot=False, save=False, show=True,
                                resample=False):
         """
@@ -313,6 +244,8 @@ class MUSEImage(Image):
                 If True, the plots will be saved. Defaults to False.
             show (bool, optional):
                 If True, the plots will be shown. Defaults to True.
+            resample (bool, optional):
+                If True, the reference image will be resampled to match the MUSE WCS. Defaults to False.
         """
 
         if resample:
@@ -323,16 +256,12 @@ class MUSEImage(Image):
         reference_median, reference_std = bin_image(reference, bin_size)
 
         #removing nans and 0s
-        index1 = np.isnan(MUSE_median)
-        index2 = np.isnan(reference_median)
-        index3 = MUSE_median == 0
-        index4 = reference_median == 0
-        index = np.any((index1, index2, index3, index4), axis=0)
+        valid_mask = ~np.isnan(MUSE_median) & ~np.isnan(reference_median) & (MUSE_median != 0) & (reference_median != 0)
 
-        MUSE_median = MUSE_median[~index]
-        MUSE_std = MUSE_std[~index]
-        reference_median = reference_median[~index]
-        reference_std = reference_std[~index]
+        MUSE_median = MUSE_median[valid_mask]
+        MUSE_std = MUSE_std[valid_mask]
+        reference_median = reference_median[valid_mask]
+        reference_std = reference_std[valid_mask]
 
         # using scipy ODR because I have errors on the x and y measuerements.
         linear = Model(linear_function)

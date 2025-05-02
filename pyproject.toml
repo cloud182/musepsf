@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "musepsf"
-version = "0.3.2"
+version = "0.4"
 authors = [
   { name="Enrico Congiu", email="econgiu@eso.org" },
 ]
@@ -27,7 +27,6 @@ dependencies = [
     "regions",
     "matplotlib",
     "scikit-image",
-    "spacepylot @ git+https://github.com/ejwatkins-astro/spacepylot.git",
     "wget"
 
 ]

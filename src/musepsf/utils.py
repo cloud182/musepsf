@@ -17,10 +17,6 @@ from scipy.optimize import leastsq
 from scipy.ndimage import zoom, binary_dilation, binary_fill_holes
 from numpy.fft import fftfreq
 
-import spacepylot.alignment as spalign
-import spacepylot.plotting as pl
-import spacepylot.alignment_utilities as alutils
-
 import wget
 import os
 import copy
@@ -589,33 +585,6 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
                      save=save, show=show, figname=figname, edge=edge, alpha0=alpha)
 
     return res, star_pos, starmask
-
-def run_spacepylot(data, reference, figname=None, fwhm=None, psf=None, alpha=2.8, scale=0.2, verbose=False):
-
-    # just to make sure I do not mess up the originals
-    newdata = data.copy()
-    newreference = reference.copy()
-
-    if fwhm is not None:
-        ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=50)
-        newreference = convolve_fft(newreference, ker_MUSE)
-        newdata = convolve_fft(newdata, psf)
-
-    op = spalign.AlignOpticalFlow(newdata, newreference, verbose=verbose)
-    op.get_iterate_translation_rotation(5)
-    op_plot = pl.AlignmentPlotting.from_align_object(op)
-
-    rotated = alutils.rotate_image(data, op.rotation_deg)
-    before = data.copy()
-    data = alutils.translate_image(rotated, op.translation)
-
-    if figname is not None:
-        op_plot.before_after()
-        plt.savefig(figname, dpi=200)
-        plt.imshow(before-data)
-        plt.savefig(figname.replace('.png', '_diff.png'))
-
-    return data, op.rotation_deg, op.translation
 
 
 def download_ps_file(run, camcol, frame, rerun, out_dir="ps_field"):
