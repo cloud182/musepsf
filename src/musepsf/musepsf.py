@@ -164,7 +164,7 @@ class MUSEImage(Image):
         edge = kwargs.pop('edge', 50)
         dx0 = kwargs.pop('dx0', 0)
         dy0 = kwargs.pop('dy0', 0)
-
+        fwhm0 = kwargs.pop('fwhm0', 0.8)
         # realign with spacepylot, works as first guesses for loop
         if spacepylot:
             data, rotation, translation = run_spacepylot(self.data, reference.data,
@@ -229,7 +229,7 @@ class MUSEImage(Image):
                                                                  psf, star_pos, starmask, zeromask,
                                                                  oversample, figname=figname,
                                                                  fit_alpha=fit_alpha,
-                                                                 alpha=alpha, fwhm0=0.8,
+                                                                 alpha=alpha, fwhm0=fwhm0,
                                                                  offset=offset,
                                                                  scale=scale,
                                                                  plot=plot, save=save,

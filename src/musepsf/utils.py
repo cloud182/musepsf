@@ -170,9 +170,7 @@ def locate_stars(image, filename=None, **kwargs):
     sigma = kwargs.get('sigma', 3.)
     radius = kwargs.get('radius', 20)
 
-    # checking if there are manual entries
-    if filename is not None:
-        stars = ascii.read(filename, names=['xcentroid', 'ycentroid'])
+
 
     # Define a threshold to look for stars
     mean, median, std = sigma_clipped_stats(image, sigma=sigma)
@@ -182,8 +180,9 @@ def locate_stars(image, filename=None, **kwargs):
     starfinder = DAOStarFinder(threshold=thresh, fwhm=fwhm, brightest=brightest)
     sources = starfinder(image)
 
-    if sources is not None and filename is not None:
-        stars = vstack([stars, sources['xcentroid', 'ycentroid']])
+    # checking if there are manual entries
+    if filename is not None:
+        stars = ascii.read(filename, names=['xcentroid', 'ycentroid'])
     elif sources is not None and filename is None:
         stars = sources['xcentroid', 'ycentroid']
     elif sources is None and filename is None: # otherwise it would reset stars to None
@@ -727,7 +726,8 @@ def plot_psf(data, output_dir, filename, residual=None, save=True, show=False, s
     if residual is None:
         residual = np.zeros_like(data)
 
-    ax3.imshow(residual, origin='lower')
+    img = ax3.imshow(residual, origin='lower')#, vmin=0.8, vmax=1.2)
+    plt.colorbar(img)
     ax1.set_title('PSF')
     ax2.set_title('PSF - 3D')
     ax3.set_title('Residuals')

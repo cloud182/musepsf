@@ -409,11 +409,12 @@ class Image:
         else:
             sys.exit('No stars were used for the fit.')
 
-        plot_psf(new_psf.data, self.output_dir, self.filename, residual=residual, save=save, show=show)
+        plot_psf(new_psf.data, self.output_dir, self.filename, residual=residual/np.max(new_psf.data), save=save, show=show)
 
         # saving the ePSF as a fits file, making sure it is normalized to 1
 
         psf_flux = np.sum(new_psf.data)
+        print(psf_flux)
         if np.abs(1-psf_flux) < 0.0001:
             hdu = fits.PrimaryHDU(new_psf.data)
             self.psf = new_psf.data
