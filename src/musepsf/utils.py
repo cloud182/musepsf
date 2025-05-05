@@ -15,6 +15,7 @@ from photutils.detection import DAOStarFinder
 from astropy.convolution import convolve_fft
 from scipy.optimize import leastsq
 from scipy.ndimage import zoom, binary_dilation, binary_fill_holes
+from scipy.ndimage import maximum_filter, label
 from numpy.fft import fftfreq
 
 import wget
@@ -714,3 +715,23 @@ def rebin(image, factor):
     shape = (image.shape[0] // factor, factor, image.shape[1] // factor, factor)
     newimage = image.reshape(shape).mean(axis=(1, 3))
     return newimage
+
+
+def find_peaks_2d(data, threshold):
+    """
+    Trova i picchi in un'immagine 2D.
+
+    Args:
+        data (np.ndarray): L'immagine 2D.
+        threshold (float): Valore minimo per considerare un picco.
+
+    Returns:
+        list: Lista di coordinate (y, x) dei picchi.
+    """
+    # Applica un filtro massimo per trovare i massimi locali
+    neighborhood = maximum_filter(data, size=3)
+    peaks = (data == neighborhood) & (data > threshold)
+
+    peak_coords = np.argwhere(peaks)
+
+    return peak_coords
