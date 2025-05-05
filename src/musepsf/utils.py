@@ -17,6 +17,7 @@ from scipy.optimize import leastsq
 from scipy.ndimage import zoom, binary_dilation, binary_fill_holes
 from scipy.ndimage import maximum_filter, label
 from numpy.fft import fftfreq
+from scipy.spatial import cKDTree
 
 import wget
 import os
@@ -735,3 +736,22 @@ def find_peaks_2d(data, threshold):
     peak_coords = np.argwhere(peaks)
 
     return peak_coords
+
+def remove_close_stars(coords):
+    # Convert coordinates to a 2D array (RA, Dec in degrees)
+    coords_array = np.vstack((coords.ra.deg, coords.dec.deg)).T
+
+    # Build a KDTree for efficient distance computation
+    tree = cKDTree(coords_array)
+
+    # Find all neighbors within the minimum distance
+    min_distance = 3.5 / 3600.0  # Convert arcseconds to degrees
+    pairs = tree.query_pairs(min_distance)
+
+    # Create a set of indices to remove
+    indices_to_remove = set(i for i, _ in pairs).union(j for _, j in pairs)
+    print(f"Removing {len(indices_to_remove)} close stars")
+
+    # Filter the catalog and coordinates
+    mask = np.array([i not in indices_to_remove for i in range(len(coords))])
+    return mask

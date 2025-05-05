@@ -22,7 +22,8 @@ from mpdaf.obj import Image as MPDAFImage
 import sys
 import os
 
-from .utils import query_gaia, create_sdss_psf, plot_psf, find_peaks_2d
+from .utils import query_gaia, create_sdss_psf, plot_psf, find_peaks_2d, remove_close_stars
+from scipy.spatial import cKDTree
 
 class Image:
     """
@@ -32,7 +33,7 @@ class Image:
         filename (str):
             name of the input file
         inpit_dir (str):
-            path of the input file
+            location of the input file
         output_dir (str):
             path where to save the output files
         data (np.ndarray):
@@ -232,12 +233,9 @@ class Image:
         coords = SkyCoord(gaia_cat['ra'], gaia_cat['dec'], unit=(u.deg, u.deg))
 
         # removing very nearby sources from the catalog
-        # Calculate separations between unique pairs of coordinates
-        separation = np.array([[coord.separation(other_coord).arcsec for other_coord in coords] for coord in coords])
-        min_distance = 5  # minimum radius in arcsec
-        close_neighbors = np.any((separation < min_distance) & (separation > 0), axis=1)
-        gaia_cat = gaia_cat[~close_neighbors].copy()
-        coords = coords[~close_neighbors].copy()
+        good_stars = remove_close_stars(coords)
+        gaia_cat = gaia_cat[good_stars].copy()
+        coords = coords[good_stars].copy()
 
         # selecting based on the G magnitude
         mask1 = (gaia_cat['phot_g_mean_mag'] >= gmin) * (gaia_cat['phot_g_mean_mag'] <= gmax)
