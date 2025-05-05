@@ -15,7 +15,7 @@ from photutils.detection import DAOStarFinder
 from astropy.convolution import convolve_fft
 from scipy.optimize import leastsq
 from scipy.ndimage import zoom, binary_dilation, binary_fill_holes
-from scipy.ndimage import maximum_filter, label
+from scipy.ndimage import maximum_filter, gaussian_filter
 from numpy.fft import fftfreq
 from scipy.spatial import cKDTree
 
@@ -326,7 +326,8 @@ def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arraysl
 
     reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
 
-    reference_conv = rebin(reference_conv, oversample)
+    if oversample > 1:
+        reference_conv = rebin(reference_conv, oversample)
 
     assert reference_conv.shape == starmask.shape, 'Starmask and reference_conv have different shapes'
     assert reference_conv.shape == convolved.shape, 'Convolved and reference_conv have different shapes'
@@ -399,7 +400,8 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
     reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
 
-    reference_conv = rebin(reference_conv, oversample)
+    if oversample > 1:
+        reference_conv = rebin(reference_conv, oversample)
 
     ref_masked = apply_mask(reference_conv, starmask, nanmask)
 
@@ -527,7 +529,7 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
     # I need this to make sure I create the fxx and fyy correctly.
     # maybe it could be removed?
     ker_MUSE = moffat_kernel(1, 2.8, scale=scale, img_size=50*oversample)
-    # convolving WFI image for the model of MUSE PSF
+    # convolving WFI image for the model of MUSE PSF This is needed only to compute the array slices
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
 
     fx = fftfreq(reference_conv.shape[1])
@@ -540,9 +542,11 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
         center = dimension_conv - (dimension_conv + 1) // 2
         arrayslices += [center - dimension // 2, center + (dimension + 1) // 2]
 
+    # convolving MUSE for the reference PSF
     convolved = convolve_fft(data, psf)
 
-    convolved = rebin(convolved, oversample)
+    if oversample > 1:
+        convolved = rebin(convolved, oversample)
 
     assert convolved.shape == starmask.shape, 'Convolved and starmask have different shapes'
 
@@ -713,8 +717,9 @@ def plot_psf(data, output_dir, filename, residual=None, save=True, show=False, s
 
 def rebin(image, factor):
 
-    shape = (image.shape[0] // factor, factor, image.shape[1] // factor, factor)
-    newimage = image.reshape(shape).mean(axis=(1, 3))
+    sigma = factor / 2.0
+    filtered = gaussian_filter(image, sigma=sigma) #try to removes high frequencies and improve results
+    newimage = zoom(filtered, 1/factor, order=3) * factor**2
     return newimage
 
 
