@@ -22,7 +22,8 @@ from mpdaf.obj import Image as MPDAFImage
 import sys
 import os
 
-from .utils import query_gaia, create_sdss_psf, plot_psf
+from .utils import query_gaia, create_sdss_psf, plot_psf, find_peaks_2d, remove_close_stars
+from scipy.spatial import cKDTree
 
 class Image:
     """
@@ -32,7 +33,7 @@ class Image:
         filename (str):
             name of the input file
         inpit_dir (str):
-            path of the input file
+            location of the input file
         output_dir (str):
             path where to save the output files
         data (np.ndarray):
@@ -229,19 +230,33 @@ class Image:
         """
 
         gaia_cat = query_gaia(center, radius)
+        coords = SkyCoord(gaia_cat['ra'], gaia_cat['dec'], unit=(u.deg, u.deg))
+
+        # removing very nearby sources from the catalog
+        good_stars = remove_close_stars(coords)
+        gaia_cat = gaia_cat[good_stars].copy()
+        coords = coords[good_stars].copy()
+
+        # selecting based on the G magnitude
         mask1 = (gaia_cat['phot_g_mean_mag'] >= gmin) * (gaia_cat['phot_g_mean_mag'] <= gmax)
         print(f'Selecting stars between {gmin} and {gmax} G mag')
         gaia_cat = gaia_cat[mask1].copy()
+        coords = coords[mask1].copy()
 
-        coords = SkyCoord(gaia_cat['ra'], gaia_cat['dec'], unit=(u.deg, u.deg))
+        # Filtro per rimuovere oggetti vicini ai bordi dell'immagine
+        x, y = self.wcs.world_to_pixel(coords)
+        margin = 15  # Margine in pixel
+        valid_x = (x >= margin) & (x < self.data.shape[1] - margin)
+        valid_y = (y >= margin) & (y < self.data.shape[0] - margin)
+        valid_mask = valid_x & valid_y
+
+        #making sure the stars are inside the image
         inside = np.array([True if self.wcs.footprint_contains(coord) else False for coord in coords])
 
         if self.galaxy is not None:
             mask2 = self.galaxy.contains(coords, wcs=self.wcs)
 
-        gaia_cat = gaia_cat[inside*(~mask2)].copy()
-
-        # remove stars not in the actual image.
+        gaia_cat = gaia_cat[inside*(~mask2)*valid_mask].copy()
 
         self.stars = gaia_cat
 
@@ -268,6 +283,7 @@ class Image:
 
         x, y = [], []
         xplt, yplt = [], []
+        new_ra, new_dec = [], []
 
         # fitter = fitting.LevMarLSQFitter()
 
@@ -282,24 +298,21 @@ class Image:
                 continue
             if zoom.data.mask.sum() >= 5:
                 continue
-            guess = np.unravel_index(zoom.data.argmax(), zoom.data.shape)
-            # model = models.Gaussian2D(np.nanmax(zoom.data), x_mean=guess[1], y_mean=guess[0],
-            #                           x_stddev=5, y_stddev=5)+models.Const2D(np.nanmean(zoom.data))
-            # model.theta_0.fixed=True
-            # xx, yy = np.mgrid[:zoom.data.shape[1], :zoom.data.shape[0]]
-            # fit = fitter(model, xx, yy, zoom.data)
-            # newcoord = zoom.wcs.pixel_to_world(fit.x_mean_0, fit.y_mean_0)
-            # if self.debug:
-            #     plt.imshow(zoom.data, origin='lower')
-            #     plt.scatter(fit.x_mean_0, fit.y_mean_0, c='r')
-            #     plt.scatter(guess[1], guess[0])
-            #     plt.show()
-            #     print(fit)
+            peaks = find_peaks_2d(zoom.data, threshold=0.05*np.nanmax(zoom.data))
+
+            if len(peaks) > 1:
+                continue
+            elif len(peaks) == 0:
+                guess = np.unravel_index(zoom.data.argmax(), zoom.data.shape)
+            else:
+                guess = (peaks[0][0], peaks[0][1])
+
             newcoord = zoom.wcs.pixel_to_world(guess[1], guess[0])
             newpix = wcs.world_to_pixel(newcoord)
             x.append(newpix[0])
             y.append(newpix[1])
-
+            new_ra.append(newcoord.ra)
+            new_dec.append(newcoord.dec)
             # in the original frame, just for plotting
             newpix_plot = self.wcs.world_to_pixel(newcoord)
             xplt.append(newpix_plot[0])
@@ -309,6 +322,9 @@ class Image:
         stars_tbl = Table()
         stars_tbl['x'] = x
         stars_tbl['y'] = y
+        # I'm keeping the ra and dec to save the table later
+        stars_tbl['ra'] = new_ra
+        stars_tbl['dec'] = new_dec
 
         # plotting some diagnostics results
         fig, ax = plt.subplots(1, 1, figsize=(14, 14), subplot_kw={'projection': self.wcs})
@@ -368,14 +384,18 @@ class Image:
 
         if stars_file is None:
             self.get_gaia_catalog(center, gmin, gmax, radius=radius)
-            self.stars['ra', 'dec'].write(os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.dat')),
+            coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
+            stars_tbl = self.build_startable(coords, data, wcs, save=save, show=show)
+            # saving the table in ra and dec to make sure everything is always plotted correctly
+            stars_tbl['ra', 'dec'].write(os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.dat')),
                             format='ascii.no_header', overwrite=True)
+            stars_tbl = stars_tbl['x', 'y']  # removing ra and dec
         else:
             print(f'Using {stars_file}')
             self.stars = ascii.read(stars_file, format='no_header', names=['ra', 'dec'])
-
-        coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
-        stars_tbl = self.build_startable(coords, data, wcs, save=save, show=show)
+            coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
+            x, y = self.wcs.world_to_pixel(coords)
+            stars_tbl = Table([x, y], names=['x', 'y'])
 
         nddata = NDData(data=data)
         stars = extract_stars(nddata, stars_tbl, size=npix)
@@ -414,7 +434,6 @@ class Image:
         # saving the ePSF as a fits file, making sure it is normalized to 1
 
         psf_flux = np.sum(new_psf.data)
-        print(psf_flux)
         if np.abs(1-psf_flux) < 0.0001:
             hdu = fits.PrimaryHDU(new_psf.data)
             self.psf = new_psf.data

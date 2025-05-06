@@ -15,7 +15,9 @@ from photutils.detection import DAOStarFinder
 from astropy.convolution import convolve_fft
 from scipy.optimize import leastsq
 from scipy.ndimage import zoom, binary_dilation, binary_fill_holes
+from scipy.ndimage import maximum_filter, gaussian_filter
 from numpy.fft import fftfreq
+from scipy.spatial import cKDTree
 
 import wget
 import os
@@ -324,7 +326,8 @@ def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arraysl
 
     reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
 
-    reference_conv = rebin(reference_conv, oversample)
+    if oversample > 1:
+        reference_conv = rebin(reference_conv, oversample)
 
     assert reference_conv.shape == starmask.shape, 'Starmask and reference_conv have different shapes'
     assert reference_conv.shape == convolved.shape, 'Convolved and reference_conv have different shapes'
@@ -397,7 +400,8 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
     reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
 
-    reference_conv = rebin(reference_conv, oversample)
+    if oversample > 1:
+        reference_conv = rebin(reference_conv, oversample)
 
     ref_masked = apply_mask(reference_conv, starmask, nanmask)
 
@@ -525,7 +529,7 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
     # I need this to make sure I create the fxx and fyy correctly.
     # maybe it could be removed?
     ker_MUSE = moffat_kernel(1, 2.8, scale=scale, img_size=50*oversample)
-    # convolving WFI image for the model of MUSE PSF
+    # convolving WFI image for the model of MUSE PSF This is needed only to compute the array slices
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
 
     fx = fftfreq(reference_conv.shape[1])
@@ -538,9 +542,11 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
         center = dimension_conv - (dimension_conv + 1) // 2
         arrayslices += [center - dimension // 2, center + (dimension + 1) // 2]
 
+    # convolving MUSE for the reference PSF
     convolved = convolve_fft(data, psf)
 
-    convolved = rebin(convolved, oversample)
+    if oversample > 1:
+        convolved = rebin(convolved, oversample)
 
     assert convolved.shape == starmask.shape, 'Convolved and starmask have different shapes'
 
@@ -711,6 +717,46 @@ def plot_psf(data, output_dir, filename, residual=None, save=True, show=False, s
 
 def rebin(image, factor):
 
-    shape = (image.shape[0] // factor, factor, image.shape[1] // factor, factor)
-    newimage = image.reshape(shape).mean(axis=(1, 3))
+    sigma = factor / 2.0
+    filtered = gaussian_filter(image, sigma=sigma) #try to removes high frequencies and improve results
+    newimage = zoom(filtered, 1/factor, order=3) * factor**2
     return newimage
+
+
+def find_peaks_2d(data, threshold):
+    """
+    Trova i picchi in un'immagine 2D.
+
+    Args:
+        data (np.ndarray): L'immagine 2D.
+        threshold (float): Valore minimo per considerare un picco.
+
+    Returns:
+        list: Lista di coordinate (y, x) dei picchi.
+    """
+    # Applica un filtro massimo per trovare i massimi locali
+    neighborhood = maximum_filter(data, size=3)
+    peaks = (data == neighborhood) & (data > threshold)
+
+    peak_coords = np.argwhere(peaks)
+
+    return peak_coords
+
+def remove_close_stars(coords):
+    # Convert coordinates to a 2D array (RA, Dec in degrees)
+    coords_array = np.vstack((coords.ra.deg, coords.dec.deg)).T
+
+    # Build a KDTree for efficient distance computation
+    tree = cKDTree(coords_array)
+
+    # Find all neighbors within the minimum distance
+    min_distance = 3.5 / 3600.0  # Convert arcseconds to degrees
+    pairs = tree.query_pairs(min_distance)
+
+    # Create a set of indices to remove
+    indices_to_remove = set(i for i, _ in pairs).union(j for _, j in pairs)
+    print(f"Removing {len(indices_to_remove)} close stars")
+
+    # Filter the catalog and coordinates
+    mask = np.array([i not in indices_to_remove for i in range(len(coords))])
+    return mask
