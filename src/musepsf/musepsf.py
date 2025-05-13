@@ -152,8 +152,8 @@ class MUSEImage(Image):
             plot_images(self.data, reference.data, 'MUSE', 'Reference', outname,
                         save=save, show=show)
 
-        # I need to know where the image is zero to erode it before minimization
-        zeromask = self.data == 0
+        # I need to know where the image is zero or NaN to erode it before minimization
+        zeromask = (self.data == 0) | (~np.isfinite(self.data))
 
         # rescaling the flux
         self.check_flux_calibration(reference.data, plot=plot, save=save, show=show)
