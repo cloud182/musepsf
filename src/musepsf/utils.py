@@ -8,16 +8,19 @@ import astropy.units as u
 from astropy.io import ascii, fits
 from astropy.wcs import WCS
 from astropy.table import vstack
-from astropy.convolution import Moffat2DKernel
+from astropy.convolution import Moffat2DKernel, convolve_fft
 from astropy.stats import sigma_clipped_stats
 from astroquery.gaia import Gaia
 from photutils.detection import DAOStarFinder
-from astropy.convolution import convolve_fft
+from astropy.modeling import models, fitting
 from scipy.optimize import leastsq
 from scipy.ndimage import zoom, binary_dilation, binary_fill_holes
 from scipy.ndimage import maximum_filter, gaussian_filter
 from numpy.fft import fftfreq
 from scipy.spatial import cKDTree
+from scipy.odr import ODR, Model, RealData
+
+from itertools import product
 
 import wget
 import os
@@ -72,7 +75,7 @@ def get_norm(image, perc=99.9):
     interval = vis.PercentileInterval(perc)
     vmin, vmax = interval.get_limits(image)
     norm = vis.ImageNormalize(vmin=vmin, vmax=vmax,
-                            stretch=vis.LogStretch(1000))
+                              stretch=vis.LogStretch(1000))
     return norm
 
 
@@ -110,7 +113,7 @@ def plot_images(image1, image2, title1, title2, name, save=False, show=True):
     else:
         plt.close()
 
-def bin_image(image, bin_size=15):
+def bin_image(image, bin_size=15, zeromask=None):
     """
     Bin images for flux calibration checks
 
@@ -126,6 +129,9 @@ def bin_image(image, bin_size=15):
         np.ndarray:
             Standard deviation of the flux in each bin
     """
+
+    if zeromask is not None:
+        image[zeromask] = 0
 
     n_x = image.shape[1] // bin_size
     n_y = image.shape[0] // bin_size
@@ -324,7 +330,10 @@ def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arraysl
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
     # import sys; sys.exit()
 
-    reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
+    if oversample > 1:
+        reference_conv = apply_offset_fourier(reference_conv, dx*oversample, dy*oversample, fxx, fyy, arrayslices)
+    else:
+        reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
 
     if oversample > 1:
         reference_conv = rebin(reference_conv, oversample)
@@ -580,11 +589,11 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
     best_fit = res[0]
 
     print('Fit completed')
-    print(f'Measured FWHM = {best_fit[0]:0.2f}')
+    print(f'Measured FWHM = {best_fit[0]:0.3f}')
     if offset:
-        print(f'Measured offset x:{best_fit[1]:0.2f} y:{best_fit[2]:0.2f}')
+        print(f'Measured offset x:{best_fit[1]:0.3f} y:{best_fit[2]:0.3f}')
     if fit_alpha:
-        print(f'Measured alpha = {best_fit[-1]:0.2f}')
+        print(f'Measured alpha = {best_fit[-1]:0.3f}')
 
     if plot:
         plot_results(best_fit, convolved, reference, starmask, zeromask, fxx, fyy, arrayslices, oversample=oversample,
@@ -760,3 +769,272 @@ def remove_close_stars(coords):
     # Filter the catalog and coordinates
     mask = np.array([i not in indices_to_remove for i in range(len(coords))])
     return mask
+
+
+def fit_2D_psf(data, mode='moffat'):
+
+    yy, xx = np.indices(data.shape)
+
+    fitter = fitting.LevMarLSQFitter()
+
+    if mode == 'moffat':
+        model = models.Moffat2D(amplitude=1, x_0=data.shape[1]/2, y_0=data.shape[0]/2,
+                                gamma=1, alpha=2.5)
+        fit = fitter(model, xx, yy, data)
+
+        return fit.fwhm
+
+    if mode == 'gaussian':
+        model = models.Gaussian2D(amplitude=1, x_0=data.shape[1]/2, y_0=data.shape[0]/2,
+                                   stddev_x=1, stddev_y=1)
+        fit = fitter(model, xx, yy, data)
+
+        return np.mean([fit.x_fwhm, fit.y_fwhm])
+
+    if mode == 'empirical':
+
+        # oversample image
+        image_oversampled = zoom(data, 10, order=3)
+
+        # find the peak value of the PSF
+        max_value = np.nanmax(image_oversampled)
+
+        # find the peak position
+        max_coords = np.unravel_index(np.nanargmax(image_oversampled), image_oversampled.shape)
+
+        # create a radial profile
+        y, x = np.indices(image_oversampled.shape)
+        r = np.sqrt((x - max_coords[1])**2 + (y - max_coords[0])**2)
+        r = r.astype(int)
+
+        tbin = np.bincount(r.ravel(), image_oversampled.ravel())
+        nr = np.bincount(r.ravel())
+        radialprofile = tbin / nr
+
+        # find the half maximum value
+        half_max = max_value / 2.0
+
+        # measure the FWHM
+        fwhm = 2 * np.interp(half_max, radialprofile[::-1], np.arange(len(radialprofile))[::-1])
+
+        return fwhm / 10
+
+
+def check_flux_calibration(muse, reference, zeromask=None, bin_size=15, plot=False,
+                           save=False, show=True, outname=None, outname_scatter=None):
+    """
+    Check that the flux calibration between the two images is consistent.
+
+    Args:
+        reference (np.ndarray):
+            Reference image
+        bin_size (int, optional):
+            Size of each bin used to compare the flux calibration. Defaults to 15.
+        plot (bool, optional):
+            If True, some diagnostic plots will be produced. Defaults to False.
+        save (bool, optional):
+            If True, the plots will be saved. Defaults to False.
+        show (bool, optional):
+            If True, the plots will be shown. Defaults to True.
+        resample (bool, optional):
+            If True, the reference image will be resampled to match the MUSE WCS. Defaults to False.
+    """
+
+    MUSE_median, MUSE_std = bin_image(muse, bin_size, zeromask)
+    reference_median, reference_std = bin_image(reference, bin_size)
+
+    #removing nans and 0s
+    valid_mask = ~np.isnan(MUSE_median) & ~np.isnan(reference_median) & (MUSE_median != 0) & (reference_median != 0)
+
+    MUSE_median = MUSE_median[valid_mask]
+    MUSE_std = MUSE_std[valid_mask]
+    reference_median = reference_median[valid_mask]
+    reference_std = reference_std[valid_mask]
+
+    # using scipy ODR because I have errors on the x and y measuerements.
+    linear = Model(linear_function)
+    mydata = RealData(MUSE_median, reference_median, sx=MUSE_std, sy=reference_std)
+    myodr = ODR(mydata, linear, beta0=[1, 0])
+    output = myodr.run()
+
+    if plot:
+        plt.scatter(MUSE_median, reference_median)
+        plt.plot(MUSE_median, linear_function(output.beta, MUSE_median))
+        plt.ylabel('Flux WFI')
+        plt.xlabel('Flux MUSE')
+        if save:
+            plt.savefig(outname_scatter)
+        if show:
+            plt.show()
+        else:
+            plt.close()
+
+    print('\nResidual flux correction.')
+    print('Gamma: {:0.3f}, b: {:0.3f}' .format(output.beta[0], output.beta[1]))
+
+    orig = muse/reference
+
+    new_muse = output.beta[0]*muse + output.beta[1]
+
+    # making sure that pixels outside the image stays zero
+    rescaled = new_muse/reference
+    if zeromask is not None:
+        new_muse[zeromask] = np.nan
+        rescaled[zeromask] = np.nan
+        orig[zeromask] = np.nan
+
+    print('Correction applied.')
+    if plot:
+        plot_images(orig, rescaled, 'Original', 'Rescaled,', outname,
+                    save=save, show=show)
+    return new_muse
+
+def rmse_test(data, reference, psf, starmask, zeromask, fwhm0, dx0, dy0, figname=None,
+              alpha=2.8, edge=50, save=False, show=False, scale=0.2, **kwargs):
+
+    # filling eventual holes in the masks caused by the resampling
+    zeromask = binary_fill_holes(zeromask)
+    if starmask is not None:
+        starmask = binary_fill_holes(starmask)
+    else:
+        starmask = np.zeros_like(zeromask)
+
+
+    # set the edges to zero
+    zeromask[0, :] = True
+    zeromask[-1, :] = True
+    zeromask[:, 0] = True
+    zeromask[:, -1] = True
+
+    if edge != 0:
+        strct_array = np.ones((2*edge+1, 2*edge+1), dtype=bool)
+        # for _ in range(oversample):
+        zeromask = binary_dilation(zeromask, structure=strct_array)
+
+    # computing things to perform the minimization more efficiently
+    # creating model of MUSE PSF
+    # I need this to make sure I create the fxx and fyy correctly.
+    # maybe it could be removed?
+    ker_MUSE = moffat_kernel(1, 2.8, scale=scale, img_size=50)
+    # convolving WFI image for the model of MUSE PSF This is needed only to compute the array slices
+    reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
+
+    fx = fftfreq(reference_conv.shape[1])
+    fy = fftfreq(reference_conv.shape[0])
+
+    fxx, fyy = np.meshgrid(fx, fy)
+
+    arrayslices = []
+    for dimension_conv, dimension in zip(reference_conv.shape, reference.shape):
+        center = dimension_conv - (dimension_conv + 1) // 2
+        arrayslices += [center - dimension // 2, center + (dimension + 1) // 2]
+
+    # convolving MUSE for the reference PSF
+    convolved = convolve_fft(data, psf)
+
+    assert convolved.shape == starmask.shape, 'Convolved and starmask have different shapes'
+
+    convolved = apply_mask(convolved, starmask, zeromask)
+
+    delta_off = kwargs.get('delta_off', 2)
+    delta_fwhm = kwargs.get('delta_fwhm', 0.5)
+    num_points = kwargs.get('num_points', 11)
+
+    if num_points % 2 == 0:
+        raise ValueError("num_points must be odd to guarantee zero is in the middle.")
+
+    test_yx = np.linspace(-delta_off, delta_off, num_points)
+    test_fwhm = np.linspace(-delta_fwhm, delta_fwhm, num_points)
+
+    rmse_cube = np.zeros((num_points, num_points, num_points))
+
+    # Iterates on all the combinations of translation and rotation
+    for idx, (dy, dx, df) in enumerate(product(test_yx, test_yx, test_fwhm)):
+        i, j, k = np.unravel_index(idx, (num_points, num_points, num_points))
+        new_dx = dx0 + dx
+        new_dy = dy0 + dy
+        new_fhwm = fwhm0 + df
+        out = to_minimize([new_fhwm, new_dy, new_dx], convolved, reference, starmask, zeromask,
+                          fxx, fyy, arrayslices, 1, alpha, scale=0.2)
+
+        rmse_cube[i, j, k] = np.sqrt(np.nanmean(out**2))
+
+        # isolate the RMSE cube projections for 2 variables
+
+    rmse_proj_yx = np.squeeze(rmse_cube[:, :, test_fwhm == 0])  # (y, x)
+    rmse_proj_yf = np.squeeze(rmse_cube[:, test_yx == 0, :])   # (y) e rot
+    rmse_proj_xf = np.squeeze(rmse_cube[test_yx == 0, :, :])   # (x) e rot
+
+    # Plots
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    axes = axes.flatten()
+
+    ax = axes[0]
+    im = ax.matshow(rmse_proj_yx, origin='lower', extent=[-delta_off, delta_off, -delta_off, delta_off], cmap='viridis')
+    ax.set_xlabel('x offset')
+    ax.set_ylabel('y offset')
+    ax.set_xticks(test_yx)
+    ax.set_yticks(test_yx)
+    ax.set_xticklabels([f"{val:.2f}" for val in test_yx])
+    ax.set_yticklabels([f"{val:.2f}" for val in test_yx])
+    ax.set_title('RMSE Projection (y, x)')
+    fig.colorbar(im, ax=ax)
+
+    ax = axes[1]
+    im = ax.matshow(rmse_proj_yf, origin='lower', extent=[-delta_fwhm, delta_fwhm, -delta_off, delta_off], cmap='viridis')
+    ax.set_xlabel('FWHM offset')
+    ax.set_ylabel('y offset')
+    ax.set_xticks(test_fwhm)
+    ax.set_yticks(test_yx)
+    ax.set_xticklabels([f"{val:.2f}" for val in test_fwhm])
+    ax.set_yticklabels([f"{val:.2f}" for val in test_yx])
+    ax.set_title('RMSE Projection (y, FWHM)')
+    fig.colorbar(im, ax=ax)
+
+    ax = axes[2]
+    im = ax.matshow(rmse_proj_xf, origin='lower', extent=[-delta_fwhm, delta_fwhm, -delta_off, delta_off], cmap='viridis')
+    ax.set_xlabel('FWHM offset')
+    ax.set_ylabel('x offset')
+    ax.set_xticks(test_fwhm)
+    ax.set_yticks(test_yx)
+    ax.set_xticklabels([f"{val:.2f}" for val in test_fwhm])
+    ax.set_yticklabels([f"{val:.2f}" for val in test_yx])
+    ax.set_title('RMSE Projection (x, FWHM)')
+    fig.colorbar(im, ax=ax)
+
+    # isolate the RMSE cube projections for single variables
+
+    rmse_proj_x = np.squeeze(rmse_cube[test_yx==0, :, test_fwhm==0] ) # Proiezione su traslazione (y, x)
+    rmse_proj_y = np.squeeze(rmse_cube[:, test_yx==0, test_fwhm==0] ) # Proiezione su traslazione (y) e rotazione
+    rmse_proj_f = np.squeeze(rmse_cube[test_yx==0, test_yx==0, :] ) # Proiezione su traslazione (x) e rotazione
+
+
+    ax = axes[3]
+    im = ax.plot(test_yx,  rmse_proj_x)
+    ax.set_xlabel('x offset')
+    ax.set_ylabel('RMSE x')
+    ax.set_xticks(test_yx)
+    ax.set_xticklabels([f"{val:.2f}" for val in test_yx])
+
+    ax = axes[4]
+    im = ax.plot(test_yx,  rmse_proj_y)
+    ax.set_xlabel('y offset')
+    ax.set_ylabel('RMSE y')
+    ax.set_xticks(test_yx)
+    ax.set_xticklabels([f"{val:.2f}" for val in test_yx])
+
+    ax = axes[5]
+    im = ax.plot(test_fwhm, rmse_proj_f)
+    ax.set_xlabel('FWHM offset')
+    ax.set_ylabel('RMSE rot')
+    ax.set_xticks(test_fwhm)
+    ax.set_xticklabels([f"{val:.2f}" for val in test_fwhm])
+
+    plt.tight_layout()
+
+    if save:
+        plt.savefig(figname, dpi=300)
+    if show:
+        plt.show()
+    else:
+        plt.close()

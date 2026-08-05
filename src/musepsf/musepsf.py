@@ -4,12 +4,11 @@ import matplotlib.pyplot as plt
 
 
 from scipy.ndimage import rotate, zoom
-from scipy.odr import ODR, Model, RealData
 from .image import Image
 
 import os
 
-from .utils import plot_images, bin_image, linear_function, run_measure_psf, locate_stars, plot_psf, rebin
+from .utils import plot_images, run_measure_psf, locate_stars, plot_psf, check_flux_calibration
 
 
 class MUSEImage(Image):
@@ -113,6 +112,9 @@ class MUSEImage(Image):
         if not os.path.isdir(self.region_dir):
             os.makedirs(self.region_dir)
 
+        # I need to know where the image is zero to erode it before minimization
+        self.zeromask = (self.data == 0) + np.isnan(self.data)
+
 
     def measure_psf(self, reference: Image, fit_alpha=False, plot=False, save=False, show=True,
                     offset=False, oversample=None, **kwargs):
@@ -145,22 +147,28 @@ class MUSEImage(Image):
         assert reference.psf is not None, 'The reference PSF is missing'
         assert reference.psfscale == np.around(self.wcs.proj_plane_pixel_scales()[0].to(u.arcsec).value, 3), 'The PSF has been created with a different pixel scale'
 
+        self.suffix = kwargs.pop('suffix', '')
+
         # resampling the reference to the MUSE WCS
-        reference.resample(header=self.header)
+        resample = kwargs.pop('resample', True)
+        if resample:
+            reference.resample(header=self.header)
         if plot:
-            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '_resampled.png'))
+            outname = os.path.join(self.output_dir, self.filename.replace('.fits', f'{self.suffix}_resampled.png'))
             plot_images(self.data, reference.data, 'MUSE', 'Reference', outname,
                         save=save, show=show)
 
-        # I need to know where the image is zero to erode it before minimization
-        zeromask = self.data == 0
-
         # rescaling the flux
-        self.check_flux_calibration(reference.data, plot=plot, save=save, show=show)
+        rescaled_name = os.path.join(self.output_dir,
+                               self.filename.replace('.fits', f'{self.suffix}_rescaled.png'))
+        scatter_name = os.path.join(self.output_dir,
+                                       self.filename.replace('.fits', f'{self.suffix}_scatter.png'))
 
-        figname = os.path.join(self.output_dir, self.filename.replace('.fits', '_final.png'))
+        self.data = check_flux_calibration(self.data, reference.data, self.zeromask, plot=plot, save=save,
+                               show=show, outname=rescaled_name, outname_scatter=scatter_name)
 
-        if self.main_header['HIERARCH ESO TPL ID'] == 'MUSE_wfm-ao_obs_genericoffsetLGS':
+
+        if 'WFM-AO' in self.main_header['HIERARCH ESO INS MODE']:
             alpha = 2.3
         else:
             alpha = 2.8
@@ -179,14 +187,14 @@ class MUSEImage(Image):
         if mask_stars:
             if os.path.isfile(reg_name):
                 print('Including manually selected sources')
-                star_pos, starmask = locate_stars(data, filename=reg_name, **kwargs)
+                star_pos, self.starmask = locate_stars(data, filename=reg_name, **kwargs)
             else:
-                star_pos, starmask = locate_stars(data, filename=None, **kwargs)
+                star_pos, self.starmask = locate_stars(data, filename=None, **kwargs)
                 if star_pos is not None:
                     star_pos.write(reg_name, format='ascii.no_header')
         else:
             star_pos = None
-            starmask = np.zeros(data.shape, dtype=bool)
+            self.starmask = np.zeros(data.shape, dtype=bool)
 
 
         # get the rotation of the image
@@ -206,7 +214,7 @@ class MUSEImage(Image):
             psf = zoom(psf, zoom=oversample)
             psf /= psf.sum()
 
-            plot_psf(psf, self.output_dir, self.filename, suffix='_oversampled')
+            plot_psf(psf, self.output_dir, self.filename, suffix=f'{self.suffix}_oversampled')
 
             scale = self.scale/oversample
         else:
@@ -214,8 +222,11 @@ class MUSEImage(Image):
             scale = self.scale
             oversample = 1
 
+        figname = os.path.join(self.output_dir, self.filename.replace('.fits', f'{self.suffix}_final.png'))
+
         self.res, self.star_pos, self.starmask = run_measure_psf(data, ref_data,
-                                                                 psf, star_pos, starmask, zeromask,
+                                                                 psf, star_pos, self.starmask,
+                                                                 self.zeromask,
                                                                  oversample, figname=figname,
                                                                  fit_alpha=fit_alpha,
                                                                  alpha=alpha, fwhm0=fwhm0,
@@ -225,75 +236,6 @@ class MUSEImage(Image):
                                                                  edge=edge, dx0=dx0, dy0=dy0,
                                                                  **kwargs)
         self.best_fit = self.res[0]
-
-
-
-    def check_flux_calibration(self, reference, bin_size=15, plot=False, save=False, show=True,
-                               resample=False):
-        """
-        Check that the flux calibration between the two images is consistent.
-
-        Args:
-            reference (np.ndarray):
-                Reference image
-            bin_size (int, optional):
-                Size of each bin used to compare the flux calibration. Defaults to 15.
-            plot (bool, optional):
-                If True, some diagnostic plots will be produced. Defaults to False.
-            save (bool, optional):
-                If True, the plots will be saved. Defaults to False.
-            show (bool, optional):
-                If True, the plots will be shown. Defaults to True.
-            resample (bool, optional):
-                If True, the reference image will be resampled to match the MUSE WCS. Defaults to False.
-        """
-
-        if resample:
-            reference.resample(header=self.header)
-            reference = reference.data
-
-        MUSE_median, MUSE_std = bin_image(self.data, bin_size)
-        reference_median, reference_std = bin_image(reference, bin_size)
-
-        #removing nans and 0s
-        valid_mask = ~np.isnan(MUSE_median) & ~np.isnan(reference_median) & (MUSE_median != 0) & (reference_median != 0)
-
-        MUSE_median = MUSE_median[valid_mask]
-        MUSE_std = MUSE_std[valid_mask]
-        reference_median = reference_median[valid_mask]
-        reference_std = reference_std[valid_mask]
-
-        # using scipy ODR because I have errors on the x and y measuerements.
-        linear = Model(linear_function)
-        mydata = RealData(MUSE_median, reference_median, sx=MUSE_std, sy=reference_std)
-        myodr = ODR(mydata, linear, beta0=[1, 0])
-        output = myodr.run()
-
-        if plot:
-            plt.scatter(MUSE_median, reference_median)
-            plt.plot(MUSE_median, linear_function(output.beta, MUSE_median))
-            plt.ylabel('Flux WFI')
-            plt.xlabel('Flux MUSE')
-            if save:
-                outname = os.path.join(self.output_dir, self.filename.replace('.fits', '_scatter.png'))
-                plt.savefig(outname)
-            if show:
-                plt.show()
-            else:
-                plt.close()
-
-        print('\nResidual flux correction.')
-        print('Gamma: {:0.3f}, b: {:0.3f}' .format(output.beta[0], output.beta[1]))
-
-        orig = self.data/reference
-
-        self.data = output.beta[0]*self.data + output.beta[1]
-        rescaled = self.data/reference
-        print('Correction applied.')
-        if plot:
-            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '_rescaled.png'))
-            plot_images(orig, rescaled, 'Original', 'Rescaled,', outname,
-                        save=save, show=show)
 
 
     def get_rot(self):

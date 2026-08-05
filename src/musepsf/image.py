@@ -22,7 +22,7 @@ from mpdaf.obj import Image as MPDAFImage
 import sys
 import os
 
-from .utils import query_gaia, create_sdss_psf, plot_psf, find_peaks_2d, remove_close_stars
+from .utils import query_gaia, create_sdss_psf, plot_psf, find_peaks_2d, remove_close_stars, fit_2D_psf
 from scipy.spatial import cKDTree
 
 class Image:
@@ -116,7 +116,7 @@ class Image:
             try:
                 self.units = u.Unit(self.header['BUNIT'])
                 self.units *= u.pix
-            except ValueError:
+            except KeyError:
                 print('The card BUNIT does not exist.')
         else:
             self.units=units
@@ -347,7 +347,7 @@ class Image:
         return stars_tbl
 
     def build_psf(self, center, gmin, gmax, stars_file=None, radius=10*u.arcmin, npix=35, pixscale=0.2,
-                  oversampling=4, save=True, show=True):
+                  oversampling=4, save=True, show=True, **kwargs):
         """
         Build the ePSF of the considered image. Extracted from the EPSFBuilder tutorial
 
@@ -444,7 +444,8 @@ class Image:
         out = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.fits'))
         hdu.writeto(out, overwrite=True)
 
-
+        mode = kwargs.get('mode', 'empirical')
+        self.psf_fwhm = fit_2D_psf(self.psf, mode)
 
 
     def recover_SDSS_PSF(self, save=True, show=False, pixscale=0.2):
@@ -494,7 +495,7 @@ class Image:
         self.data = tmp_image.value
         self.units = out_units
 
-    def open_psf(self, filename):
+    def open_psf(self, filename, **kwargs):
         """
         Open the PSF file.
 
@@ -509,3 +510,6 @@ class Image:
 
         self.psf = psf
         self.psfscale = head['PSFSCALE']
+
+        mode = kwargs.get('mode', 'empirical')
+        self.psf_fwhm = fit_2D_psf(self.psf, mode)
