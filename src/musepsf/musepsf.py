@@ -160,7 +160,7 @@ class MUSEImage(Image):
 
         figname = os.path.join(self.output_dir, self.filename.replace('.fits', '_final.png'))
 
-        if self.main_header['HIERARCH ESO TPL ID'] == 'MUSE_wfm-ao_obs_genericoffsetLGS':
+        if self.main_header['HIERARCH ESO INS MODE'] in ['MUSE-AO-N', 'MUSE-AO-E']:
             alpha = 2.3
         else:
             alpha = 2.8
