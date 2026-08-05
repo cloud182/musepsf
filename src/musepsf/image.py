@@ -109,7 +109,7 @@ class Image:
                 self.main_header = hdu[headerhdu].header
             else:
                 self.main_header = None
-            self.data = np.nan_to_num(self.data, nan=0, posinf=0, neginf=0)
+            # self.data = np.nan_to_num(self.data, nan=0, posinf=0, neginf=0)
 
         self.wcs = WCS(self.header)
         if units is None:
@@ -198,9 +198,9 @@ class Image:
             center (SkyXCoord):
                 Center of the region to mask
             amax (u.arcmin):
-                Major axis of the ellipse.
+                Semi-major axis of the ellipse.
             amin (u.arcmin):
-                Minor axis of the ellipse
+                Semi-minor axis of the ellipse
             pa (u.deg):
                 Position angle of the ellipse. Counted from North, counter-clockwise
         """
@@ -231,21 +231,25 @@ class Image:
 
         gaia_cat = query_gaia(center, radius)
         coords = SkyCoord(gaia_cat['ra'], gaia_cat['dec'], unit=(u.deg, u.deg))
+        # print('Found', len(gaia_cat), 'stars from Gaia') # duplicate with the output in query_gaia()
 
         # removing very nearby sources from the catalog
         good_stars = remove_close_stars(coords)
         gaia_cat = gaia_cat[good_stars].copy()
         coords = coords[good_stars].copy()
+        print(len(gaia_cat), 'stars after 1st close-star removal (within Gaia stars)')
 
         # selecting based on the G magnitude
         mask1 = (gaia_cat['phot_g_mean_mag'] >= gmin) * (gaia_cat['phot_g_mean_mag'] <= gmax)
         print(f'Selecting stars between {gmin} and {gmax} G mag')
+        print(np.sum(mask1),'satisfying mag selection out of',len(gaia_cat))
         gaia_cat = gaia_cat[mask1].copy()
         coords = coords[mask1].copy()
 
         # Filtro per rimuovere oggetti vicini ai bordi dell'immagine
+        # Filter to remove objects near the edges of the image
         x, y = self.wcs.world_to_pixel(coords)
-        margin = 15  # Margine in pixel
+        margin = 15  # Margin in pixel
         valid_x = (x >= margin) & (x < self.data.shape[1] - margin)
         valid_y = (y >= margin) & (y < self.data.shape[0] - margin)
         valid_mask = valid_x & valid_y
@@ -259,6 +263,8 @@ class Image:
         gaia_cat = gaia_cat[inside*(~mask2)*valid_mask].copy()
 
         self.stars = gaia_cat
+
+        print(len(gaia_cat),'stars satisfy location requirement (outside galaxy, inside image, away from image boundary)')
 
 
 
@@ -286,6 +292,8 @@ class Image:
         new_ra, new_dec = [], []
 
         # fitter = fitting.LevMarLSQFitter()
+        
+        # print('star count input to build_startable', len(coords)) # duplicate to the output after location requirements
 
         #recentering the stars. Weirdly fitting a gaussian does not work. For now,
         #I'll try with identifying the max. Will see
@@ -298,14 +306,15 @@ class Image:
                 continue
             if zoom.data.mask.sum() >= 5:
                 continue
-            peaks = find_peaks_2d(zoom.data, threshold=0.05*np.nanmax(zoom.data))
 
+            peaks = find_peaks_2d(zoom.data, threshold=0.05*np.nanmax(zoom.data))
             if len(peaks) > 1:
                 continue
             elif len(peaks) == 0:
                 guess = np.unravel_index(zoom.data.argmax(), zoom.data.shape)
             else:
                 guess = (peaks[0][0], peaks[0][1])
+            # guess = np.unravel_index(zoom.data.argmax(), zoom.data.shape)
 
             newcoord = zoom.wcs.pixel_to_world(guess[1], guess[0])
             newpix = wcs.world_to_pixel(newcoord)
@@ -326,8 +335,10 @@ class Image:
         stars_tbl['ra'] = new_ra
         stars_tbl['dec'] = new_dec
 
+        print('star count after 2nd close-star removal (find_peaks_2d), also final count in star table:',len(xplt))
+
         # plotting some diagnostics results
-        fig, ax = plt.subplots(1, 1, figsize=(14, 14), subplot_kw={'projection': self.wcs})
+        fig, ax = plt.subplots(1, 1, figsize=(7, 7), subplot_kw={'projection': self.wcs})
         norm = simple_norm(self.data, 'log', percent=99.9)
         ax.imshow(self.data, norm=norm)
         ax.scatter(xplt, yplt, s=80, facecolors='none', edgecolors='r')

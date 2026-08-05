@@ -28,7 +28,8 @@ from urllib.error import HTTPError
 
 
 # configure astroquery gaia
-Gaia.ROW_LIMIT = 10000
+# Gaia.ROW_LIMIT = 10000
+Gaia.ROW_LIMIT = -1 # unlimited i.e. to obtain all entries
 Gaia.MAIN_GAIA_TABLE = "gaiadr3.gaia_source"
 SDSS_URL = "https://data.sdss.org/sas/dr13/eboss/photo/redux"
 
@@ -48,10 +49,13 @@ def query_gaia(center, radius):
     """
 
     r = Gaia.query_object_async(coordinate=center, radius=radius)
-    r = r['ra', 'dec', 'parallax', 'phot_g_mean_mag', 'classprob_dsc_combmod_star'].copy()
+    r = r['ra', 'dec', 'parallax', 'phot_g_mean_mag', 'classprob_dsc_combmod_star', 'classprob_dsc_combmod_quasar', 'classprob_dsc_combmod_galaxy'].copy()
+    print('Gaia source count before star confirmation',len(r))
     mask = np.abs(r['classprob_dsc_combmod_star']) > 0.99
+    # mask = np.abs(r['classprob_dsc_combmod_galaxy']) > 0.99
     r = r[mask].copy()
-    return r
+    print('Gaia source count after star confirmation',len(r))
+    return r['ra', 'dec', 'parallax', 'phot_g_mean_mag', 'classprob_dsc_combmod_star']
 
 
 def get_norm(image, perc=99.9):
@@ -254,7 +258,7 @@ def apply_mask(image, starmask, nanmask):
 
 
 def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, oversample, alpha0=None,
-                fwhm_bound=[0.4, 2], alpha_bound=[1, 10], dd_bound=[-2, 2], scale=0.2):
+                fwhm_bound=[0.4, 2], alpha_bound=[1, 10], dd_bound=[-2, 2], scale=0.2, bad_pixel_mask_ext=None):
     """
     Compute the function to be minimize to measure the PSF properties
 
@@ -333,11 +337,16 @@ def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arraysl
     assert reference_conv.shape == convolved.shape, 'Convolved and reference_conv have different shapes'
 
     ref_masked = apply_mask(reference_conv, starmask, nanmask)
+    
+    if bad_pixel_mask_ext is not None: ref_masked[bad_pixel_mask_ext] = np.nan
+    # plt.figure(); plt.imshow(np.log(ref_masked));plt.show()
 
     # leastsq requires the array of residuals to be minimized
     function = (convolved-ref_masked)
+    valid = np.isfinite(function)
 
-    return function.ravel() * factor
+    return function[valid].ravel() * factor
+
 
 def apply_offset_fourier(convolved, dx, dy, fxx, fyy, arrayslices):
 
@@ -352,7 +361,7 @@ def apply_offset_fourier(convolved, dx, dy, fxx, fyy, arrayslices):
 
 
 def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, figname, oversample, save=False, show=False,
-                 edge=50, alpha0=None, scale=0.2):
+                 edge=50, alpha0=None, scale=0.2, bad_pixel_mask_ext=None):
     """
     Functions that plot the final results of the PSF fitting
 
@@ -405,6 +414,9 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
 
     ref_masked = apply_mask(reference_conv, starmask, nanmask)
 
+    if bad_pixel_mask_ext is not None: ref_masked[bad_pixel_mask_ext] = np.nan
+    # plt.figure(); plt.imshow(np.log(ref_masked));plt.show()
+    
     # plotting the results of the convolution
 
     fig = plt.figure(figsize=(16, 6))
@@ -494,7 +506,7 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
         show (bool, optional):
             If True, the plots will be shown. Defaults to False.
         scale (float, optional):
-            Scale fo the data array. Defaults to 0.2.
+            Cell scale of the data array. Defaults to 0.2".
 
     Returns:
         dict:
@@ -506,6 +518,7 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
     """
 
     # filling eventual holes in the masks caused by the resampling
+    # also filling holes due to bad pixels with NaNs, leaving only the image edges in the mask
     zeromask = binary_fill_holes(zeromask)
     if starmask is not None:
         starmask = binary_fill_holes(starmask)
@@ -570,12 +583,35 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
         else:
             p0=[fwhm0]
 
+    bad_pixel_mask = np.isnan(reference)
+    psf_size = int(2.0/scale) # 2" enlargement
+    psf_2d = np.ones(shape=(psf_size,psf_size))
+    bad_pixel_mask_ext = binary_dilation(bad_pixel_mask, structure=psf_2d)
+
     res = leastsq(to_minimize, x0=p0,
                 #convolved, reference, starmask, edge, alpha0, fwhm_bound,
                 # alpha_bound, scale
                 args=(convolved, reference, starmask, zeromask, fxx, fyy, arrayslices, oversample, alpha, fwhm_bound,
-                        alpha_bound, dd_bound, scale),
+                        alpha_bound, dd_bound, scale), # , bad_pixel_mask_ext
                 maxfev=600, xtol=1e-9, full_output=True)
+
+
+    # prototype of rms clipping in the residual space (not implemented yet)
+    # rms_clip = 0.
+    # if rms_clip >0:
+    #     ref_masked = ref_conv(res[0], reference, starmask, zeromask, fxx, fyy, arrayslices, oversample)
+    #     residual_2d = convolved-ref_masked
+    #     sigma = np.std(residual_2d)
+
+    #     starmask[residual_2d > rms_clip*sigma] = 1
+    #     starmask[residual_2d < -rms_clip*sigma] = 1
+
+    #     res = leastsq(to_minimize, x0=p0,
+    #                 #convolved, reference, starmask, edge, alpha0, fwhm_bound,
+    #                 # alpha_bound, scale
+    #                 args=(convolved, reference, starmask, zeromask, fxx, fyy, arrayslices, oversample, alpha, fwhm_bound,
+    #                         alpha_bound, dd_bound, scale, bad_pixel_mask_ext),
+    #                 maxfev=600, xtol=1e-9, full_output=True)
 
     best_fit = res[0]
 
@@ -588,9 +624,40 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
 
     if plot:
         plot_results(best_fit, convolved, reference, starmask, zeromask, fxx, fyy, arrayslices, oversample=oversample,
-                     save=save, show=show, figname=figname, edge=edge, alpha0=alpha)
+            save=save, show=show, figname=figname, edge=edge, alpha0=alpha, ) # bad_pixel_mask_ext=bad_pixel_mask_ext
 
     return res, star_pos, starmask
+
+
+def ref_conv(pars, reference, starmask, nanmask, fxx, fyy, arrayslices, oversample=1, scale=0.2):
+    # to convolve reference image with a presumed MUSE PSF. Copied from to_minimize and plot_results
+    # to aid the prototype of rms clipping in the residual space (not implemented yet)
+
+    if len(pars) == 1:
+        fwhm = pars[0]
+        alpha, dx, dy = alpha0, 0, 0
+    if len(pars) == 2:
+        fwhm, alpha = pars
+        dx, dy = 0, 0
+    elif len(pars) == 3:
+        fwhm, dx, dy = pars
+        alpha = alpha0
+    elif len(pars) == 4:
+        fwhm, dx, dy, alpha = pars
+
+    # creating model of MUSE PSF
+    ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=50*oversample)
+
+    # convolving WFI image for the model of MUSE PSF
+    reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
+    reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
+
+    if oversample > 1:
+        reference_conv = rebin(reference_conv, oversample)
+
+    ref_masked = apply_mask(reference_conv, starmask, nanmask)
+
+    return ref_masked
 
 
 def download_ps_file(run, camcol, frame, rerun, out_dir="ps_field"):
@@ -726,6 +793,7 @@ def rebin(image, factor):
 def find_peaks_2d(data, threshold):
     """
     Trova i picchi in un'immagine 2D.
+    Find peaks in a 2D image.
 
     Args:
         data (np.ndarray): L'immagine 2D.
@@ -755,7 +823,7 @@ def remove_close_stars(coords):
 
     # Create a set of indices to remove
     indices_to_remove = set(i for i, _ in pairs).union(j for _, j in pairs)
-    print(f"Removing {len(indices_to_remove)} close stars")
+    print(f"Removing {len(indices_to_remove)} close stars from {len(coords)}")
 
     # Filter the catalog and coordinates
     mask = np.array([i not in indices_to_remove for i in range(len(coords))])
