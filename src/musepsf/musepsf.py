@@ -57,30 +57,30 @@ class MUSEImage(Image):
             best fitting parameters
 
     Methods:
+        measure_psf(reference: Image, fit_alpha=False, plot=False, save=False, show=True,
+                    offset=False, oversample=None, **kwargs):
+            Measure the PSF of the image by using a cross-convolution technique to compare it
+            to a reference image with known PSF.
+        get_rot():
+            Return the rotation angle (in degrees) of the image with respect to celestial north.
+
+    Inherited from Image:
         resample(header=None, pixscale=None):
             Resample the image to match a specific resolution or a specific header.
         mask_galaxy(center, amax, amin, pa):
             Mask the area covered by the galaxy when looking for gaia stars.
-        get_gaia_catalog(center, gmin, gmax, radius=10*u.arcmin, save=True):
+        get_gaia_catalog(center, gmin, gmax, radius=10*u.arcmin):
             Query the Gaia Catalog to identify stars in the field of the galaxy.
-        build_startable(coords):
+        build_startable(coords, data, wcs, save=True, show=False):
             Refine the position of the stars and build the star table that will be feed to the
             ePSF builder
-        build_psf(center, gmin, gmax, radius=10*u.arcmin, npix=35,
-                  oversampling=4, save=True, show=True):
+        build_psf(center, gmin, gmax, stars_file=None, radius=10*u.arcmin, npix=35,
+                  pixscale=0.2, oversampling=4, save=True, show=True):
             Build the ePSF of the considered image.
         convert_units(out_units, equivalency=None):
             Convert the unit of measurement of the image.
         open_psf(filename):
             Open the file containing the PSF of the image.
-        measure_psf(reference: Image, fit_alpha=False, plot=False, save=False, show=True,
-                    **kwargs):
-            Measure the PSF of the image by using a cross-convolution technique.
-        to_minimize(pars, reference, plot=False, save=False, show=False,
-                    figname=None, edge=10):
-            Function to be minimize to measure the PSF properties
-        check_flux_calibration(self, reference, bin_size=15, plot=False, save=False, show=True):
-            Check that the flux calibration between the two images is consistent.
     """
 
     def __init__(self, filename, input_dir='./', output_dir='./', datahdu=1, headerhdu=0, debug=False,
@@ -131,8 +131,6 @@ class MUSEImage(Image):
                 Defaults to False.
             plot (bool, optional):
                 If True, several diagnostic plots will be produced. Defaults to False.
-            align (bool, optional):
-                If True, spacepylot will be used to refine the alignment of the images.
             save (bool, optional):
                 If True, the plots will be saved. Defaults to False.
             show (bool, optional):
@@ -143,9 +141,12 @@ class MUSEImage(Image):
                 If not None, the image will be oversampled by this factor. Defaults to None.
         """
 
-        assert self.units == reference.units, 'The two images are not in the same units'
-        assert reference.psf is not None, 'The reference PSF is missing'
-        assert reference.psfscale == np.around(self.wcs.proj_plane_pixel_scales()[0].to(u.arcsec).value, 3), 'The PSF has been created with a different pixel scale'
+        if self.units != reference.units:
+            raise ValueError('The two images are not in the same units')
+        if reference.psf is None:
+            raise ValueError('The reference PSF is missing')
+        if reference.psfscale != np.around(self.wcs.proj_plane_pixel_scales()[0].to(u.arcsec).value, 3):
+            raise ValueError('The PSF has been created with a different pixel scale')
 
         self.suffix = kwargs.pop('suffix', '')
 
@@ -177,7 +178,6 @@ class MUSEImage(Image):
         dx0 = kwargs.pop('dx0', 0)
         dy0 = kwargs.pop('dy0', 0)
         fwhm0 = kwargs.pop('fwhm0', 0.8)
-        # realign with spacepylot, works as first guesses for loop
         data = self.data
 
         reg_name = os.path.join(self.region_dir, self.filename.replace('.fits', '_regions.reg'))

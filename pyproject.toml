@@ -20,15 +20,22 @@ classifiers = [
 dependencies = [
     "astropy >=5.2",
     "numpy",
-    "scipy >=1.9c",
+    "scipy >=1.9",
     "astroquery",
     "photutils >=2.0.2",
     "reproject >=0.10.0",
     "regions",
     "matplotlib",
-    "scikit-image",
+    "mpdaf",
     "wget"
 
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-cov",
+    "pytest-mock"
 ]
 
 [project.urls]

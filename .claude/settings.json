@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gpg --list-secret-keys --keyid-format=long)",
+      "Read(//home/econgiu/.ssh/**)",
+      "Bash(git config *)",
+      "Bash(python3 -m pytest tests/test_utils.py::TestBinImage -v --no-header -p no:cacheprovider)",
+      "Bash(python3 -c \"import musepsf; from musepsf.image import Image; from musepsf.musepsf import MUSEImage; print\\('OK'\\)\")",
+      "Bash(python3 -m pytest tests/test_image.py::test_resample_to_pixscale_uses_requested_scale -v --no-header -p no:cacheprovider)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -c \"import musepsf; from musepsf.image import Image; from musepsf.musepsf import MUSEImage; print\\('import OK'\\)\")",
+      "Bash(python -m pytest tests/test_image.py tests/test_utils.py -q)",
+      "Bash(python -m pytest tests/ -q)"
+    ]
+  }
+}

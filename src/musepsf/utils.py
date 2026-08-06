@@ -3,14 +3,11 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 import astropy.visualization as vis
 import matplotlib.pyplot as plt
 import numpy as np
-import astropy.units as u
 
 from astropy.io import ascii, fits
 from astropy.wcs import WCS
-from astropy.table import vstack
 from astropy.convolution import Moffat2DKernel, convolve_fft
 from astropy.stats import sigma_clipped_stats
-from astroquery.gaia import Gaia
 from photutils.detection import DAOStarFinder
 from astropy.modeling import models, fitting
 from scipy.optimize import leastsq
@@ -24,15 +21,9 @@ from itertools import product
 
 import wget
 import os
-import copy
 import shutil
 
-from urllib.error import HTTPError
 
-
-# configure astroquery gaia
-Gaia.ROW_LIMIT = 10000
-Gaia.MAIN_GAIA_TABLE = "gaiadr3.gaia_source"
 SDSS_URL = "https://data.sdss.org/sas/dr13/eboss/photo/redux"
 
 def query_gaia(center, radius):
@@ -49,6 +40,14 @@ def query_gaia(center, radius):
         astropy.table.Table:
             table with the Gaia stars in the field
     """
+
+    # deferred import: astroquery.gaia reaches out to the Gaia archive as a
+    # side effect of being imported, so this stays lazy until query_gaia is
+    # actually called instead of running at package import time
+    from astroquery.gaia import Gaia
+
+    Gaia.ROW_LIMIT = 10000
+    Gaia.MAIN_GAIA_TABLE = "gaiadr3.gaia_source"
 
     r = Gaia.query_object_async(coordinate=center, radius=radius)
     r = r['ra', 'dec', 'parallax', 'phot_g_mean_mag', 'classprob_dsc_combmod_star'].copy()
@@ -79,6 +78,22 @@ def get_norm(image, perc=99.9):
     return norm
 
 
+def _finalize_plot(fig, outname, save=False, show=False, dpi=None):
+    """
+    Shared save/show/close boilerplate for the diagnostic plotting helpers below.
+    dpi=None matches plt.savefig()'s own default (no explicit dpi override).
+    """
+    if save:
+        if dpi is None:
+            fig.savefig(outname)
+        else:
+            fig.savefig(outname, dpi=dpi)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
 def plot_images(image1, image2, title1, title2, name, save=False, show=True):
     """
     Routine to plot two images side by side with the same color scale
@@ -106,12 +121,7 @@ def plot_images(image1, image2, title1, title2, name, save=False, show=True):
     ax[1].imshow(image2, norm=norm, origin='lower')
     ax[0].set_title(title1)
     ax[1].set_title(title2)
-    if save:
-        plt.savefig(name, dpi=300)
-    if show:
-        plt.show()
-    else:
-        plt.close()
+    _finalize_plot(fig, name, save=save, show=show, dpi=300)
 
 def bin_image(image, bin_size=15, zeromask=None):
     """
@@ -131,21 +141,15 @@ def bin_image(image, bin_size=15, zeromask=None):
     """
 
     if zeromask is not None:
+        image = image.copy()
         image[zeromask] = 0
 
-    n_x = image.shape[1] // bin_size
     n_y = image.shape[0] // bin_size
-    median = np.zeros((n_y, n_x))
-    std = np.zeros_like(median)
-    for i in range(n_x):
-        for j in range(n_y):
-            median[j, i] = np.median(image[j*bin_size:j*bin_size+bin_size,
-                                                i*bin_size:i*bin_size+bin_size])
-            std[j, i] = np.std(image[j*bin_size:j*bin_size+bin_size,
-                                          i*bin_size:i*bin_size+bin_size])
+    n_x = image.shape[1] // bin_size
+    blocks = image[:n_y*bin_size, :n_x*bin_size].reshape(n_y, bin_size, n_x, bin_size)
 
-    median = np.ravel(median)
-    std = np.ravel(std)
+    median = np.median(blocks, axis=(1, 3)).ravel()
+    std = np.std(blocks, axis=(1, 3)).ravel()
 
     return median, std
 
@@ -174,23 +178,19 @@ def locate_stars(image, filename=None, **kwargs):
     sigma = kwargs.get('sigma', 3.)
     radius = kwargs.get('radius', 20)
 
-
-
-    # Define a threshold to look for stars
-    mean, median, std = sigma_clipped_stats(image, sigma=sigma)
-    thresh = mean + 10. * std
-
-    # Initializing and starting the starfinder
-    starfinder = DAOStarFinder(threshold=thresh, fwhm=fwhm, brightest=brightest)
-    sources = starfinder(image)
-
-    # checking if there are manual entries
+    # checking if there are manual entries; if so, skip the (potentially expensive) star search
     if filename is not None:
         stars = ascii.read(filename, names=['xcentroid', 'ycentroid'])
-    elif sources is not None and filename is None:
-        stars = sources['xcentroid', 'ycentroid']
-    elif sources is None and filename is None: # otherwise it would reset stars to None
-        stars = None
+    else:
+        # Define a threshold to look for stars
+        mean, median, std = sigma_clipped_stats(image, sigma=sigma)
+        thresh = mean + 10. * std
+
+        # Initializing and starting the starfinder
+        starfinder = DAOStarFinder(threshold=thresh, fwhm=fwhm, brightest=brightest)
+        sources = starfinder(image)
+
+        stars = sources['xcentroid', 'ycentroid'] if sources is not None else None
 
     if stars is not None:
         mask = np.zeros(image.shape, dtype=bool)
@@ -253,10 +253,33 @@ def apply_mask(image, starmask, nanmask):
     masked = np.ma.masked_array(data=image, mask=nanmask)
 
     if starmask is not None:
-        assert starmask.shape == image.shape, 'Mask and image are of different shape'
+        if starmask.shape != image.shape:
+            raise ValueError('Mask and image are of different shape')
         masked[starmask] = np.ma.masked
 
     return masked
+
+
+def _unpack_fit_params(pars, alpha0=None):
+    """
+    Unpack the leastsq parameter vector shared by to_minimize() and plot_results().
+
+    Depending on which of fwhm/offset/alpha are being fit, `pars` has length 1 (fwhm
+    only), 2 (fwhm, alpha), 3 (fwhm, dx, dy) or 4 (fwhm, dx, dy, alpha).
+    """
+    if len(pars) == 1:
+        fwhm = pars[0]
+        alpha, dx, dy = alpha0, 0, 0
+    if len(pars) == 2:
+        fwhm, alpha = pars
+        dx, dy = 0, 0
+    elif len(pars) == 3:
+        fwhm, dx, dy = pars
+        alpha = alpha0
+    elif len(pars) == 4:
+        fwhm, dx, dy, alpha = pars
+
+    return fwhm, alpha, dx, dy
 
 
 def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, oversample, alpha0=None,
@@ -291,17 +314,7 @@ def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arraysl
             Function needed for the minimization
     """
 
-    if len(pars) == 1:
-        fwhm = pars[0]
-        alpha, dx, dy = alpha0, 0, 0
-    if len(pars) == 2:
-        fwhm, alpha = pars
-        dx, dy = 0, 0
-    elif len(pars) == 3:
-        fwhm, dx, dy = pars
-        alpha = alpha0
-    elif len(pars) == 4:
-        fwhm, dx, dy, alpha = pars
+    fwhm, alpha, dx, dy = _unpack_fit_params(pars, alpha0)
 
     factor = 1 #this is a factor that will be used to return very high numbers if the
                 #parameters are out of bounds
@@ -338,8 +351,10 @@ def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arraysl
     if oversample > 1:
         reference_conv = rebin(reference_conv, oversample)
 
-    assert reference_conv.shape == starmask.shape, 'Starmask and reference_conv have different shapes'
-    assert reference_conv.shape == convolved.shape, 'Convolved and reference_conv have different shapes'
+    if reference_conv.shape != starmask.shape:
+        raise ValueError('Starmask and reference_conv have different shapes')
+    if reference_conv.shape != convolved.shape:
+        raise ValueError('Convolved and reference_conv have different shapes')
 
     ref_masked = apply_mask(reference_conv, starmask, nanmask)
 
@@ -390,17 +405,7 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
             pixel scale of the images. Defaults to 0.2.
     """
 
-    if len(pars) == 1:
-        fwhm = pars[0]
-        alpha, dx, dy = alpha0, 0, 0
-    if len(pars) == 2:
-        fwhm, alpha = pars
-        dx, dy = 0, 0
-    elif len(pars) == 3:
-        fwhm, dx, dy = pars
-        alpha = alpha0
-    elif len(pars) == 4:
-        fwhm, dx, dy, alpha = pars
+    fwhm, alpha, dx, dy = _unpack_fit_params(pars, alpha0)
 
     # creating model of MUSE PSF
     ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=50*oversample)
@@ -464,12 +469,52 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
     fig.colorbar(img2, cax=cax2)
     fig.colorbar(img3, cax=cax3)
     plt.tight_layout()
-    if save:
-        plt.savefig(figname, dpi=150)
-    if show:
-        plt.show()
+    _finalize_plot(fig, figname, save=save, show=show, dpi=150)
+
+def _prepare_fit_arrays(reference, zeromask, starmask, edge, scale, oversample=1):
+    """
+    Shared setup for the PSF-fitting minimization, used by both run_measure_psf() and
+    rmse_test(): fills mask holes, dilates the zero/edge mask by `edge` pixels, and builds
+    the FFT frequency grid and array slices needed by apply_offset_fourier().
+    """
+
+    # filling eventual holes in the masks caused by the resampling
+    zeromask = binary_fill_holes(zeromask)
+    if starmask is not None:
+        starmask = binary_fill_holes(starmask)
     else:
-        plt.close()
+        starmask = np.zeros_like(zeromask)
+
+    # set the edges to zero
+    zeromask[0, :] = True
+    zeromask[-1, :] = True
+    zeromask[:, 0] = True
+    zeromask[:, -1] = True
+
+    if edge != 0:
+        strct_array = np.ones((2*edge+1, 2*edge+1), dtype=bool)
+        zeromask = binary_dilation(zeromask, structure=strct_array)
+
+    # computing things to perform the minimization more efficiently
+    # creating model of MUSE PSF
+    # I need this to make sure I create the fxx and fyy correctly.
+    # maybe it could be removed?
+    ker_MUSE = moffat_kernel(1, 2.8, scale=scale, img_size=50*oversample)
+    # convolving WFI image for the model of MUSE PSF This is needed only to compute the array slices
+    reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
+
+    fx = fftfreq(reference_conv.shape[1])
+    fy = fftfreq(reference_conv.shape[0])
+
+    fxx, fyy = np.meshgrid(fx, fy)
+
+    arrayslices = []
+    for dimension_conv, dimension in zip(reference_conv.shape, reference.shape):
+        center = dimension_conv - (dimension_conv + 1) // 2
+        arrayslices += [center - dimension // 2, center + (dimension + 1) // 2]
+
+    return zeromask, starmask, fxx, fyy, arrayslices
+
 
 def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversample, figname=None, alpha=2.8,
                     edge=50, fwhm0=0.8, dx0=0, dy0=0, fit_alpha=False, plot=False, save=False,
@@ -514,42 +559,8 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
             boolean mask selecting the pixels associated to stellar emission that should be masked.
     """
 
-    # filling eventual holes in the masks caused by the resampling
-    zeromask = binary_fill_holes(zeromask)
-    if starmask is not None:
-        starmask = binary_fill_holes(starmask)
-    else:
-        starmask = np.zeros_like(zeromask)
-
-
-    # set the edges to zero
-    zeromask[0, :] = True
-    zeromask[-1, :] = True
-    zeromask[:, 0] = True
-    zeromask[:, -1] = True
-
-    if edge != 0:
-        strct_array = np.ones((2*edge+1, 2*edge+1), dtype=bool)
-        # for _ in range(oversample):
-        zeromask = binary_dilation(zeromask, structure=strct_array)
-
-    # computing things to perform the minimization more efficiently
-    # creating model of MUSE PSF
-    # I need this to make sure I create the fxx and fyy correctly.
-    # maybe it could be removed?
-    ker_MUSE = moffat_kernel(1, 2.8, scale=scale, img_size=50*oversample)
-    # convolving WFI image for the model of MUSE PSF This is needed only to compute the array slices
-    reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
-
-    fx = fftfreq(reference_conv.shape[1])
-    fy = fftfreq(reference_conv.shape[0])
-
-    fxx, fyy = np.meshgrid(fx, fy)
-
-    arrayslices = []
-    for dimension_conv, dimension in zip(reference_conv.shape, reference.shape):
-        center = dimension_conv - (dimension_conv + 1) // 2
-        arrayslices += [center - dimension // 2, center + (dimension + 1) // 2]
+    zeromask, starmask, fxx, fyy, arrayslices = _prepare_fit_arrays(
+        reference, zeromask, starmask, edge, scale, oversample=oversample)
 
     # convolving MUSE for the reference PSF
     convolved = convolve_fft(data, psf)
@@ -557,7 +568,8 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
     if oversample > 1:
         convolved = rebin(convolved, oversample)
 
-    assert convolved.shape == starmask.shape, 'Convolved and starmask have different shapes'
+    if convolved.shape != starmask.shape:
+        raise ValueError('Convolved and starmask have different shapes')
 
     convolved = apply_mask(convolved, starmask, zeromask)
 
@@ -715,13 +727,8 @@ def plot_psf(data, output_dir, filename, residual=None, save=True, show=False, s
     ax1.set_title('PSF')
     ax2.set_title('PSF - 3D')
     ax3.set_title('Residuals')
-    if save:
-        outname = os.path.join(output_dir, filename.replace('.fits', f'{suffix}.psf.png'))
-        plt.savefig(outname, dpi=300)
-    if show:
-        plt.show()
-    else:
-        plt.close()
+    outname = os.path.join(output_dir, filename.replace('.fits', f'{suffix}.psf.png'))
+    _finalize_plot(fig, outname, save=save, show=show, dpi=300)
 
 
 def rebin(image, factor):
@@ -734,16 +741,16 @@ def rebin(image, factor):
 
 def find_peaks_2d(data, threshold):
     """
-    Trova i picchi in un'immagine 2D.
+    Find the peaks in a 2D image.
 
     Args:
-        data (np.ndarray): L'immagine 2D.
-        threshold (float): Valore minimo per considerare un picco.
+        data (np.ndarray): The 2D image.
+        threshold (float): Minimum value to consider a peak.
 
     Returns:
-        list: Lista di coordinate (y, x) dei picchi.
+        list: List of (y, x) coordinates of the peaks.
     """
-    # Applica un filtro massimo per trovare i massimi locali
+    # apply a maximum filter to find the local maxima
     neighborhood = maximum_filter(data, size=3)
     peaks = (data == neighborhood) & (data > threshold)
 
@@ -785,8 +792,8 @@ def fit_2D_psf(data, mode='moffat'):
         return fit.fwhm
 
     if mode == 'gaussian':
-        model = models.Gaussian2D(amplitude=1, x_0=data.shape[1]/2, y_0=data.shape[0]/2,
-                                   stddev_x=1, stddev_y=1)
+        model = models.Gaussian2D(amplitude=1, x_mean=data.shape[1]/2, y_mean=data.shape[0]/2,
+                                   x_stddev=1, y_stddev=1)
         fit = fitter(model, xx, yy, data)
 
         return np.mean([fit.x_fwhm, fit.y_fwhm])
@@ -892,47 +899,14 @@ def check_flux_calibration(muse, reference, zeromask=None, bin_size=15, plot=Fal
 def rmse_test(data, reference, psf, starmask, zeromask, fwhm0, dx0, dy0, figname=None,
               alpha=2.8, edge=50, save=False, show=False, scale=0.2, **kwargs):
 
-    # filling eventual holes in the masks caused by the resampling
-    zeromask = binary_fill_holes(zeromask)
-    if starmask is not None:
-        starmask = binary_fill_holes(starmask)
-    else:
-        starmask = np.zeros_like(zeromask)
-
-
-    # set the edges to zero
-    zeromask[0, :] = True
-    zeromask[-1, :] = True
-    zeromask[:, 0] = True
-    zeromask[:, -1] = True
-
-    if edge != 0:
-        strct_array = np.ones((2*edge+1, 2*edge+1), dtype=bool)
-        # for _ in range(oversample):
-        zeromask = binary_dilation(zeromask, structure=strct_array)
-
-    # computing things to perform the minimization more efficiently
-    # creating model of MUSE PSF
-    # I need this to make sure I create the fxx and fyy correctly.
-    # maybe it could be removed?
-    ker_MUSE = moffat_kernel(1, 2.8, scale=scale, img_size=50)
-    # convolving WFI image for the model of MUSE PSF This is needed only to compute the array slices
-    reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
-
-    fx = fftfreq(reference_conv.shape[1])
-    fy = fftfreq(reference_conv.shape[0])
-
-    fxx, fyy = np.meshgrid(fx, fy)
-
-    arrayslices = []
-    for dimension_conv, dimension in zip(reference_conv.shape, reference.shape):
-        center = dimension_conv - (dimension_conv + 1) // 2
-        arrayslices += [center - dimension // 2, center + (dimension + 1) // 2]
+    zeromask, starmask, fxx, fyy, arrayslices = _prepare_fit_arrays(
+        reference, zeromask, starmask, edge, scale, oversample=1)
 
     # convolving MUSE for the reference PSF
     convolved = convolve_fft(data, psf)
 
-    assert convolved.shape == starmask.shape, 'Convolved and starmask have different shapes'
+    if convolved.shape != starmask.shape:
+        raise ValueError('Convolved and starmask have different shapes')
 
     convolved = apply_mask(convolved, starmask, zeromask)
 
@@ -1004,9 +978,9 @@ def rmse_test(data, reference, psf, starmask, zeromask, fwhm0, dx0, dy0, figname
 
     # isolate the RMSE cube projections for single variables
 
-    rmse_proj_x = np.squeeze(rmse_cube[test_yx==0, :, test_fwhm==0] ) # Proiezione su traslazione (y, x)
-    rmse_proj_y = np.squeeze(rmse_cube[:, test_yx==0, test_fwhm==0] ) # Proiezione su traslazione (y) e rotazione
-    rmse_proj_f = np.squeeze(rmse_cube[test_yx==0, test_yx==0, :] ) # Proiezione su traslazione (x) e rotazione
+    rmse_proj_x = np.squeeze(rmse_cube[test_yx==0, :, test_fwhm==0] ) # projection onto x offset
+    rmse_proj_y = np.squeeze(rmse_cube[:, test_yx==0, test_fwhm==0] ) # projection onto y offset
+    rmse_proj_f = np.squeeze(rmse_cube[test_yx==0, test_yx==0, :] ) # projection onto FWHM offset
 
 
     ax = axes[3]
@@ -1032,9 +1006,4 @@ def rmse_test(data, reference, psf, starmask, zeromask, fwhm0, dx0, dy0, figname
 
     plt.tight_layout()
 
-    if save:
-        plt.savefig(figname, dpi=300)
-    if show:
-        plt.show()
-    else:
-        plt.close()
+    _finalize_plot(fig, figname, save=save, show=show, dpi=300)

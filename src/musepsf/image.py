@@ -1,5 +1,3 @@
-from mpl_toolkits.mplot3d import Axes3D
-
 import numpy as np
 import matplotlib.pyplot as plt
 import astropy.units as u
@@ -12,7 +10,6 @@ from astropy.nddata import NDData, Cutout2D
 from astropy.nddata.utils import NoOverlapError
 from astropy.coordinates import SkyCoord
 from astropy.visualization import simple_norm
-from astroquery.gaia import Gaia
 from photutils.psf import extract_stars
 from reproject import reproject_interp
 from regions import EllipseSkyRegion
@@ -21,9 +18,10 @@ from mpdaf.obj import Image as MPDAFImage
 
 import sys
 import os
+import warnings
 
-from .utils import query_gaia, create_sdss_psf, plot_psf, find_peaks_2d, remove_close_stars, fit_2D_psf
-from scipy.spatial import cKDTree
+from .utils import (query_gaia, create_sdss_psf, plot_psf, find_peaks_2d, remove_close_stars,
+                     fit_2D_psf, _finalize_plot)
 
 class Image:
     """
@@ -56,18 +54,20 @@ class Image:
             Table containing the position of the stars used to measure the PSF.
 
     Methods:
-        resample(header=None, pixscale=None):
+        resample(header=None, pixscale=None, inplace=True):
             Resample the image to match a specific resolution or a specific header.
         mask_galaxy(center, amax, amin, pa):
             Mask the area covered by the galaxy when looking for gaia stars.
-        get_gaia_catalog(center, gmin, gmax, radius=10*u.arcmin, save=True):
+        get_gaia_catalog(center, gmin, gmax, radius=10*u.arcmin):
             Query the Gaia Catalog to identify stars in the field of the galaxy.
-        build_startable(coords):
+        build_startable(coords, data, wcs, save=True, show=False):
             Refine the position of the stars and build the star table that will be feed to the
             ePSF builder
-        build_psf(center, gmin, gmax, radius=10*u.arcmin, npix=35,
-                  oversampling=4, save=True, show=True):
+        build_psf(center, gmin, gmax, stars_file=None, radius=10*u.arcmin, npix=35,
+                  pixscale=0.2, oversampling=4, save=True, show=True):
             Build the ePSF of the considered image.
+        recover_SDSS_PSF(save=True, show=False, pixscale=0.2):
+            Reconstruct the SDSS PSF at the centre of the image from the psField calibration file.
         convert_units(out_units, equivalency=None):
             Convert the unit of measurement of the image.
         open_psf(filename):
@@ -117,7 +117,10 @@ class Image:
                 self.units = u.Unit(self.header['BUNIT'])
                 self.units *= u.pix
             except KeyError:
-                print('The card BUNIT does not exist.')
+                raise ValueError(
+                    f"The header of '{self.filename}' has no BUNIT card and no units were "
+                    "provided explicitly; pass units=... to the constructor."
+                ) from None
         else:
             self.units=units
         self.galaxy = None
@@ -181,7 +184,7 @@ class Image:
             newdim_y = int(image.shape[0] * scale[0]//pixscale)
             newdim_x = int(image.shape[1] * scale[1]//pixscale)
             image = image.resample(newdim=(newdim_y, newdim_x), newstart=None,
-                                   newstep=0.2, flux=True, order=3)
+                                   newstep=pixscale, flux=True, order=3)
             if inplace:
                 self.data = image.data
                 self.header = image.data_header
@@ -243,9 +246,9 @@ class Image:
         gaia_cat = gaia_cat[mask1].copy()
         coords = coords[mask1].copy()
 
-        # Filtro per rimuovere oggetti vicini ai bordi dell'immagine
+        # removing objects too close to the edges of the image
         x, y = self.wcs.world_to_pixel(coords)
-        margin = 15  # Margine in pixel
+        margin = 15  # margin in pixel
         valid_x = (x >= margin) & (x < self.data.shape[1] - margin)
         valid_y = (y >= margin) & (y < self.data.shape[0] - margin)
         valid_mask = valid_x & valid_y
@@ -255,6 +258,10 @@ class Image:
 
         if self.galaxy is not None:
             mask2 = self.galaxy.contains(coords, wcs=self.wcs)
+        else:
+            warnings.warn('mask_galaxy() was never called: no galaxy region to exclude, '
+                           'keeping all stars that pass the other selection criteria.')
+            mask2 = np.zeros(len(coords), dtype=bool)
 
         gaia_cat = gaia_cat[inside*(~mask2)*valid_mask].copy()
 
@@ -272,7 +279,8 @@ class Image:
             coords (list):
                 list of coordinates of the selected stars.
             data (np.ndarray):
-                data array.
+                data array. May be a plain array or a `numpy.ma.MaskedArray`; if masked, cutouts
+                with 5 or more masked pixels are skipped.
             wcs (astropy.wcs.WCS):
                 wcs associated to the data array.
 
@@ -285,29 +293,28 @@ class Image:
         xplt, yplt = [], []
         new_ra, new_dec = [], []
 
-        # fitter = fitting.LevMarLSQFitter()
-
-        #recentering the stars. Weirdly fitting a gaussian does not work. For now,
-        #I'll try with identifying the max. Will see
+        # recentering the stars: fitting a gaussian proved unreliable, so we
+        # identify the local peak instead
         for i, coord in enumerate(coords):
             try:
-                zoom = Cutout2D(data, coord, 7*u.arcsec, wcs=wcs)
+                cutout = Cutout2D(data, coord, 7*u.arcsec, wcs=wcs)
             except NoOverlapError:
                 continue
-            if not np.isfinite(zoom.data).all():
+            if not np.isfinite(cutout.data).all():
                 continue
-            if zoom.data.mask.sum() >= 5:
+            cutout_mask = getattr(cutout.data, 'mask', None)
+            if cutout_mask is not None and np.sum(cutout_mask) >= 5:
                 continue
-            peaks = find_peaks_2d(zoom.data, threshold=0.05*np.nanmax(zoom.data))
+            peaks = find_peaks_2d(cutout.data, threshold=0.05*np.nanmax(cutout.data))
 
             if len(peaks) > 1:
                 continue
             elif len(peaks) == 0:
-                guess = np.unravel_index(zoom.data.argmax(), zoom.data.shape)
+                guess = np.unravel_index(cutout.data.argmax(), cutout.data.shape)
             else:
                 guess = (peaks[0][0], peaks[0][1])
 
-            newcoord = zoom.wcs.pixel_to_world(guess[1], guess[0])
+            newcoord = cutout.wcs.pixel_to_world(guess[1], guess[0])
             newpix = wcs.world_to_pixel(newcoord)
             x.append(newpix[0])
             y.append(newpix[1])
@@ -331,18 +338,13 @@ class Image:
         norm = simple_norm(self.data, 'log', percent=99.9)
         ax.imshow(self.data, norm=norm)
         ax.scatter(xplt, yplt, s=80, facecolors='none', edgecolors='r')
-        pixel_region = self.galaxy.to_pixel(self.wcs)
-        pixel_region.plot(ax=ax)
+        if self.galaxy is not None:
+            pixel_region = self.galaxy.to_pixel(self.wcs)
+            pixel_region.plot(ax=ax)
         ax.set_xlabel('RA')
         ax.set_ylabel('Dec')
-        if save:
-            outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.png'))
-            plt.savefig(outname, dpi=300)
-        if show:
-            plt.show()
-        else:
-            plt.close()
-
+        outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.png'))
+        _finalize_plot(fig, outname, save=save, show=show, dpi=300)
 
         return stars_tbl
 
@@ -379,7 +381,6 @@ class Image:
         else:
             data = self.data
             wcs = self.wcs
-            header = self.header
             self.psfscale = np.around(self.wcs.proj_plane_pixel_scales()[0].to(u.arcsec).value, 3)
 
         if stars_file is None:
@@ -451,13 +452,12 @@ class Image:
     def recover_SDSS_PSF(self, save=True, show=False, pixscale=0.2):
 
         if pixscale is not None:
-            data, wcs, header = self.resample(pixscale=pixscale, inplace=False)
+            data, _, header = self.resample(pixscale=pixscale, inplace=False)
             self.psfscale = pixscale
 
         else:
             data = self.data
             header = self.header
-            wcs = WCS(header)
             self.psfscale = np.around(self.wcs.proj_plane_pixel_scales()[0].to(u.arcsec).value, 3)
 
         new_psf = create_sdss_psf(data, header, self.output_dir, pixscale=self.psfscale)
@@ -466,7 +466,7 @@ class Image:
 
         if np.abs(1-psf_flux) < 0.0001:
             hdu = fits.PrimaryHDU(new_psf)
-            self.psf = new_psf.data
+            self.psf = new_psf
         else:
             hdu = fits.PrimaryHDU(new_psf / psf_flux)
             self.psf = new_psf / psf_flux
@@ -477,6 +477,10 @@ class Image:
 
         out = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.fits'))
         hdu.writeto(out, overwrite=True)
+
+        # unlike build_psf()/open_psf(), this PSF comes directly from the SDSS calibration
+        # data rather than a model fit, so there is no FWHM to measure here
+        self.psf_fwhm = None
 
     def convert_units(self, out_units, equivalency=None):
         """
