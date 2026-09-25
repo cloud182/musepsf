@@ -27,6 +27,24 @@ class MUSEImage(Image):
             path of the input file
         output_dir (str):
             path where to save the output files
+        plot_dir (str):
+            output_dir/plots -- parent of the per-diagnostic-type plot subfolders (see Image).
+        stars_plot_dir, psf_plot_dir (str):
+            output_dir/plots/{stars,psf} -- see Image.
+        flux_calibration_plot_dir (str):
+            output_dir/plots/flux_calibration -- flux rescaling before/after and scatter plots.
+        resampled_plot_dir (str):
+            output_dir/plots/resampled -- MUSE-vs-reference resampled comparison plot.
+        fit_plot_dir (str):
+            output_dir/plots/fit -- final PSF-fit diagnostic plot (MUSE/WFI/Diff).
+        qc_plot_dir (str):
+            output_dir/plots/qc -- QC summary plot (utils.plot_qc_summary()).
+        psf_dir (str):
+            output_dir/psf -- fitted/recovered PSF FITS files (see Image).
+        catalog_dir (str):
+            output_dir/catalogs -- star tables (see Image).
+        region_dir (str):
+            output_dir/regions -- manually/automatically selected star region files.
         data (np.ndarray):
             data array
         header (astropy.header):
@@ -113,8 +131,14 @@ class MUSEImage(Image):
 
         self.scale = self.wcs.proj_plane_pixel_scales()[0].to_value(u.arcsec)
         self.region_dir = os.path.join(self.output_dir, 'regions')
-        if not os.path.isdir(self.region_dir):
-            os.makedirs(self.region_dir)
+        self.flux_calibration_plot_dir = os.path.join(self.plot_dir, 'flux_calibration')
+        self.resampled_plot_dir = os.path.join(self.plot_dir, 'resampled')
+        self.fit_plot_dir = os.path.join(self.plot_dir, 'fit')
+        self.qc_plot_dir = os.path.join(self.plot_dir, 'qc')
+        for directory in (self.region_dir, self.flux_calibration_plot_dir, self.resampled_plot_dir,
+                          self.fit_plot_dir, self.qc_plot_dir):
+            if not os.path.isdir(directory):
+                os.makedirs(directory)
 
         # I need to know where the image is zero to erode it before minimization
         self.zeromask = (self.data == 0) + np.isnan(self.data)
@@ -159,14 +183,14 @@ class MUSEImage(Image):
         if resample:
             reference.resample(header=self.header)
         if plot:
-            outname = os.path.join(self.output_dir, self.filename.replace('.fits', f'{self.suffix}_resampled.png'))
+            outname = os.path.join(self.resampled_plot_dir, self.filename.replace('.fits', f'{self.suffix}_resampled.png'))
             plot_images(self.data, reference.data, 'MUSE', 'Reference', outname,
                         save=save, show=show)
 
         # rescaling the flux
-        rescaled_name = os.path.join(self.output_dir,
+        rescaled_name = os.path.join(self.flux_calibration_plot_dir,
                                self.filename.replace('.fits', f'{self.suffix}_rescaled.png'))
-        scatter_name = os.path.join(self.output_dir,
+        scatter_name = os.path.join(self.flux_calibration_plot_dir,
                                        self.filename.replace('.fits', f'{self.suffix}_scatter.png'))
 
         self.data = check_flux_calibration(self.data, reference.data, self.zeromask, plot=plot, save=save,
@@ -218,7 +242,7 @@ class MUSEImage(Image):
             psf = zoom(psf, zoom=oversample)
             psf /= psf.sum()
 
-            plot_psf(psf, self.output_dir, self.filename, suffix=f'{self.suffix}_oversampled')
+            plot_psf(psf, self.psf_plot_dir, self.filename, suffix=f'{self.suffix}_oversampled')
 
             scale = self.scale/oversample
         else:
@@ -226,7 +250,7 @@ class MUSEImage(Image):
             scale = self.scale
             oversample = 1
 
-        figname = os.path.join(self.output_dir, self.filename.replace('.fits', f'{self.suffix}_final.png'))
+        figname = os.path.join(self.fit_plot_dir, self.filename.replace('.fits', f'{self.suffix}_final.png'))
 
         self.res, self.star_pos, self.starmask = run_measure_psf(data, ref_data,
                                                                  psf, star_pos, self.starmask,

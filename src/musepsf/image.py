@@ -37,6 +37,18 @@ class Image:
             location of the input file
         output_dir (str):
             path where to save the output files
+        plot_dir (str):
+            output_dir/plots -- parent of the per-diagnostic-type plot subfolders below. Nothing
+            is saved directly here.
+        stars_plot_dir (str):
+            output_dir/plots/stars -- star detection diagnostic PNGs.
+        psf_plot_dir (str):
+            output_dir/plots/psf -- PSF diagnostic PNGs (ePSF/SDSS-recovered PSF, oversampled
+            PSF).
+        psf_dir (str):
+            output_dir/psf -- the fitted/recovered PSF FITS files.
+        catalog_dir (str):
+            output_dir/catalogs -- star tables (e.g. the Gaia catalog used for the ePSF).
         data (np.ndarray):
             data array
         header (astropy.header):
@@ -104,6 +116,18 @@ class Image:
         self.filename = filename
         self.input_dir = input_dir
         self.output_dir = output_dir
+
+        # output files are grouped by type under output_dir, so a batch run over many images
+        # (sharing the same output_dir, see the class docstring) stays browsable -- e.g. every
+        # QC plot for the whole sample lives together in plots/qc/, not interleaved per image.
+        self.plot_dir = os.path.join(self.output_dir, 'plots')
+        self.stars_plot_dir = os.path.join(self.plot_dir, 'stars')
+        self.psf_plot_dir = os.path.join(self.plot_dir, 'psf')
+        self.psf_dir = os.path.join(self.output_dir, 'psf')
+        self.catalog_dir = os.path.join(self.output_dir, 'catalogs')
+        for directory in (self.stars_plot_dir, self.psf_plot_dir, self.psf_dir, self.catalog_dir):
+            if not os.path.isdir(directory):
+                os.makedirs(directory)
 
         with fits.open(os.path.join(self.input_dir, self.filename)) as hdu:
             self.data = hdu[datahdu].data
@@ -346,7 +370,7 @@ class Image:
             pixel_region.plot(ax=ax)
         ax.set_xlabel('RA')
         ax.set_ylabel('Dec')
-        outname = os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.png'))
+        outname = os.path.join(self.stars_plot_dir, self.filename.replace('.fits', '.stars.png'))
         _finalize_plot(fig, outname, save=save, show=show, dpi=300)
 
         return stars_tbl
@@ -391,11 +415,11 @@ class Image:
             coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
             stars_tbl = self.build_startable(coords, data, wcs, save=save, show=show)
             # saving the table in ra and dec to make sure everything is always plotted correctly
-            stars_tbl['ra', 'dec'].write(os.path.join(self.output_dir, self.filename.replace('.fits', '.stars.dat')),
+            stars_tbl['ra', 'dec'].write(os.path.join(self.catalog_dir, self.filename.replace('.fits', '.stars.dat')),
                             format='ascii.no_header', overwrite=True)
             stars_tbl = stars_tbl['x', 'y']  # removing ra and dec
         else:
-            print(f'Using {stars_file}')
+            logger.info(f'Using {stars_file}')
             self.stars = ascii.read(stars_file, format='no_header', names=['ra', 'dec'])
             coords = SkyCoord(self.stars['ra'], self.stars['dec'], unit=(u.deg, u.deg))
             x, y = self.wcs.world_to_pixel(coords)
@@ -429,11 +453,11 @@ class Image:
         residual = np.median(residuals, axis=0)
 
         if fitted_stars.n_good_stars > 0:
-            print('\n{} stars were used to build this PSF' .format(fitted_stars.n_good_stars))
+            logger.info('{} stars were used to build this PSF' .format(fitted_stars.n_good_stars))
         else:
             sys.exit('No stars were used for the fit.')
 
-        plot_psf(new_psf.data, self.output_dir, self.filename, residual=residual/np.max(new_psf.data), save=save, show=show)
+        plot_psf(new_psf.data, self.psf_plot_dir, self.filename, residual=residual/np.max(new_psf.data), save=save, show=show)
 
         # saving the ePSF as a fits file, making sure it is normalized to 1
 
@@ -445,7 +469,7 @@ class Image:
             hdu = fits.PrimaryHDU(new_psf.data / psf_flux)
             self.psf = new_psf.data / psf_flux
         hdu.header['PSFSCALE'] = self.psfscale
-        out = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.fits'))
+        out = os.path.join(self.psf_dir, self.filename.replace('.fits', '.psf.fits'))
         hdu.writeto(out, overwrite=True)
 
         mode = kwargs.get('mode', 'empirical')
@@ -476,9 +500,9 @@ class Image:
 
         hdu.header['PSFSCALE'] = self.psfscale
 
-        plot_psf(new_psf, self.output_dir, self.filename.replace('.fits', '.psf.png'), residual=None, save=save, show=show)
+        plot_psf(new_psf, self.psf_plot_dir, self.filename.replace('.fits', '.psf.png'), residual=None, save=save, show=show)
 
-        out = os.path.join(self.output_dir, self.filename.replace('.fits', '.psf.fits'))
+        out = os.path.join(self.psf_dir, self.filename.replace('.fits', '.psf.fits'))
         hdu.writeto(out, overwrite=True)
 
         # unlike build_psf()/open_psf(), this PSF comes directly from the SDSS calibration

@@ -37,6 +37,13 @@ class TestInit:
 
         assert img.scale == pytest.approx(0.2)
         assert os.path.isdir(os.path.join(str(tmp_path), 'regions'))
+        assert img.flux_calibration_plot_dir == os.path.join(str(tmp_path), 'plots', 'flux_calibration')
+        assert img.resampled_plot_dir == os.path.join(str(tmp_path), 'plots', 'resampled')
+        assert img.fit_plot_dir == os.path.join(str(tmp_path), 'plots', 'fit')
+        assert img.qc_plot_dir == os.path.join(str(tmp_path), 'plots', 'qc')
+        for directory in (img.flux_calibration_plot_dir, img.resampled_plot_dir,
+                          img.fit_plot_dir, img.qc_plot_dir):
+            assert os.path.isdir(directory)
         assert img.zeromask[0, 0]
         assert img.zeromask[1, 1]  # NaN -> 0 during Image.__init__, then flagged by zeromask
         assert not img.zeromask[5, 5]

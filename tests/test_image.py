@@ -38,6 +38,21 @@ class TestInit:
         assert img.galaxy is None
         assert img.psf is None
 
+    def test_creates_type_grouped_output_subdirectories(self, write_fits, make_wcs_header, tmp_path):
+        # output files are grouped by type under output_dir (plots/{stars,psf}, psf, catalogs),
+        # created eagerly in __init__ the same way MUSEImage already does for region_dir.
+        img = _make_image(write_fits, make_wcs_header, tmp_path, 'dirs.fits', np.zeros((10, 10)))
+
+        assert img.plot_dir == os.path.join(str(tmp_path), 'plots')
+        assert img.stars_plot_dir == os.path.join(str(tmp_path), 'plots', 'stars')
+        assert img.psf_plot_dir == os.path.join(str(tmp_path), 'plots', 'psf')
+        assert img.psf_dir == os.path.join(str(tmp_path), 'psf')
+        assert img.catalog_dir == os.path.join(str(tmp_path), 'catalogs')
+        assert os.path.isdir(img.stars_plot_dir)
+        assert os.path.isdir(img.psf_plot_dir)
+        assert os.path.isdir(img.psf_dir)
+        assert os.path.isdir(img.catalog_dir)
+
     def test_raises_value_error_when_bunit_missing_and_no_units_given(self, write_fits,
                                                                         make_wcs_header, tmp_path):
         # Regression test for KNOWN_ISSUES.md #2: a missing BUNIT card used to be silently
@@ -259,7 +274,7 @@ def test_build_psf_with_stars_file_end_to_end(write_fits, make_wcs_header, tmp_p
 
     assert img.psf.sum() == pytest.approx(1.0, abs=1e-6)
     assert img.psf_fwhm > 0
-    assert os.path.exists(os.path.join(str(tmp_path), 'bp.psf.fits'))
+    assert os.path.exists(os.path.join(str(tmp_path), 'psf', 'bp.psf.fits'))
 
 
 class TestRecoverSdssPsf:
@@ -277,8 +292,8 @@ class TestRecoverSdssPsf:
         assert img.psf.sum() == pytest.approx(1.0)
         assert img.psfscale == pytest.approx(0.2)
         assert img.psf_fwhm is None  # KNOWN_ISSUES.md #9: no model fit for this PSF source
-        assert os.path.exists(os.path.join(str(tmp_path), 'sdss.psf.fits'))
-        with fits.open(os.path.join(str(tmp_path), 'sdss.psf.fits')) as hdu:
+        assert os.path.exists(os.path.join(str(tmp_path), 'psf', 'sdss.psf.fits'))
+        with fits.open(os.path.join(str(tmp_path), 'psf', 'sdss.psf.fits')) as hdu:
             assert hdu[0].header['PSFSCALE'] == pytest.approx(0.2)
 
     def test_stores_array_when_psf_already_normalized(self, write_fits, make_wcs_header,
