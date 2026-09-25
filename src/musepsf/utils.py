@@ -25,7 +25,7 @@ import wget
 import os
 import shutil
 
-from .plotting import _finalize_plot, plot_images
+from .plotting import _finalize_plot, plot_images, _plot_rmse_cube
 
 logger = logging.getLogger(__name__)
 
@@ -880,25 +880,60 @@ def check_flux_calibration(muse, reference, zeromask=None, bin_size=15, plot=Fal
         rescaled[zeromask] = np.nan
         orig[zeromask] = np.nan
 
-    print('Correction applied.')
+    logger.info('Correction applied.')
     if plot:
         plot_images(orig, rescaled, 'Original', 'Rescaled,', outname,
                     save=save, show=show)
     return new_muse
 
 def rmse_test(data, reference, psf, starmask, zeromask, fwhm0, dx0, dy0, figname=None,
-              alpha=2.8, edge=50, save=False, show=False, scale=0.2, **kwargs):
+              alpha=2.8, edge=50, save=False, show=False, scale=0.2, plot=True, **kwargs):
+    """
+    Scan a 3D grid of (fwhm, dx, dy) offsets around a given best fit and compute the RMSE of the
+    cross-convolution residual at each grid point. Originally a purely diagnostic/visual tool;
+    also usable as a quality-control input via confidence_from_rmse_cube() and
+    qc_from_rmse_cube() (see IMPLEMENTATION_PLAN.md Phase 2), by calling with plot=False and
+    using the returned grid.
 
-    zeromask, starmask, fxx, fyy, arrayslices = _prepare_fit_arrays(
-        reference, zeromask, starmask, edge, scale, oversample=1)
+    Args:
+        plot (bool, optional):
+            If True (default, matches this function's previous behavior), produce and
+            save/show the diagnostic figure. If False, skip plotting entirely -- useful when
+            only the returned grid is needed (e.g. for quality control).
+        (remaining args as before)
+
+    Returns:
+        np.ndarray:
+            rmse_cube, shape (num_points, num_points, num_points), axes ordered (dy, dx, fwhm
+            offset) -- same convention as the rest of this function.
+        np.ndarray:
+            test_yx, the dx/dy offset grid (shared by both axes).
+        np.ndarray:
+            test_fwhm, the fwhm offset grid.
+        int:
+            dof, degrees of freedom for this grid (number of unmasked pixels minus the 3 fitted
+            parameters fwhm/dx/dy), for use with confidence_from_rmse_cube().
+    """
+
+    # fwhm_bound/alpha_bound/dd_bound intentionally left at None: to_minimize()'s bound check
+    # (KNOWN_ISSUES.md #15) exists to steer scipy.optimize.least_squares() away from
+    # out-of-bounds guesses -- least_squares() itself already enforces `bounds=` natively and
+    # never calls to_minimize() outside them, so that check is dead code for the actual fit. But
+    # this grid scan calls to_minimize() directly with points that are meant to go beyond
+    # whatever bound the fit used (that's the point of a sensitivity scan), so leaving the check
+    # enabled here previously multiplied the residual by 1e10 for a large fraction of the grid --
+    # not a measure of fit quality, just leftover leastsq-era plumbing. See
+    # test_grid_scan_is_not_corrupted_by_bounds_penalty_when_offset_exceeds_default_bound.
+    ctx = _prepare_fit_arrays(reference, zeromask, starmask, edge, scale, oversample=1,
+                              fwhm_bound=None, alpha_bound=None, dd_bound=None)
 
     # convolving MUSE for the reference PSF
     convolved = convolve_fft(data, psf)
 
-    if convolved.shape != starmask.shape:
+    if convolved.shape != ctx.starmask.shape:
         raise ValueError('Convolved and starmask have different shapes')
 
-    convolved = apply_mask(convolved, starmask, zeromask)
+    convolved = apply_mask(convolved, ctx.starmask, ctx.nanmask)
 
     delta_off = kwargs.get('delta_off', 2)
     delta_fwhm = kwargs.get('delta_fwhm', 0.5)
@@ -911,89 +946,187 @@ def rmse_test(data, reference, psf, starmask, zeromask, fwhm0, dx0, dy0, figname
     test_fwhm = np.linspace(-delta_fwhm, delta_fwhm, num_points)
 
     rmse_cube = np.zeros((num_points, num_points, num_points))
+    dof = None
 
     # Iterates on all the combinations of translation and rotation
     for idx, (dy, dx, df) in enumerate(product(test_yx, test_yx, test_fwhm)):
         i, j, k = np.unravel_index(idx, (num_points, num_points, num_points))
         new_dx = dx0 + dx
         new_dy = dy0 + dy
-        new_fhwm = fwhm0 + df
-        out = to_minimize([new_fhwm, new_dy, new_dx], convolved, reference, starmask, zeromask,
-                          fxx, fyy, arrayslices, 1, alpha, scale=0.2)
+        # moffat_kernel() needs fwhm > 0 (astropy's Moffat2DKernel requires gamma > 0); this is
+        # a physical floor, unrelated to (and much smaller than) the fit bounds disabled above.
+        new_fhwm = max(fwhm0 + df, 1e-3)
+        out = to_minimize([new_fhwm, new_dy, new_dx], convolved, reference, ctx, alpha)
+
+        if dof is None:
+            dof = out.size - 3  # fwhm, dx, dy -- the 3 parameters this grid varies
 
         rmse_cube[i, j, k] = np.sqrt(np.nanmean(out**2))
 
-        # isolate the RMSE cube projections for 2 variables
+    if plot:
+        _plot_rmse_cube(rmse_cube, test_yx, test_fwhm, delta_off, delta_fwhm, figname,
+                        save=save, show=show)
 
-    rmse_proj_yx = np.squeeze(rmse_cube[:, :, test_fwhm == 0])  # (y, x)
-    rmse_proj_yf = np.squeeze(rmse_cube[:, test_yx == 0, :])   # (y) e rot
-    rmse_proj_xf = np.squeeze(rmse_cube[test_yx == 0, :, :])   # (x) e rot
-
-    # Plots
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-    axes = axes.flatten()
-
-    ax = axes[0]
-    im = ax.matshow(rmse_proj_yx, origin='lower', extent=[-delta_off, delta_off, -delta_off, delta_off], cmap='viridis')
-    ax.set_xlabel('x offset')
-    ax.set_ylabel('y offset')
-    ax.set_xticks(test_yx)
-    ax.set_yticks(test_yx)
-    ax.set_xticklabels([f"{val:.2f}" for val in test_yx])
-    ax.set_yticklabels([f"{val:.2f}" for val in test_yx])
-    ax.set_title('RMSE Projection (y, x)')
-    fig.colorbar(im, ax=ax)
-
-    ax = axes[1]
-    im = ax.matshow(rmse_proj_yf, origin='lower', extent=[-delta_fwhm, delta_fwhm, -delta_off, delta_off], cmap='viridis')
-    ax.set_xlabel('FWHM offset')
-    ax.set_ylabel('y offset')
-    ax.set_xticks(test_fwhm)
-    ax.set_yticks(test_yx)
-    ax.set_xticklabels([f"{val:.2f}" for val in test_fwhm])
-    ax.set_yticklabels([f"{val:.2f}" for val in test_yx])
-    ax.set_title('RMSE Projection (y, FWHM)')
-    fig.colorbar(im, ax=ax)
-
-    ax = axes[2]
-    im = ax.matshow(rmse_proj_xf, origin='lower', extent=[-delta_fwhm, delta_fwhm, -delta_off, delta_off], cmap='viridis')
-    ax.set_xlabel('FWHM offset')
-    ax.set_ylabel('x offset')
-    ax.set_xticks(test_fwhm)
-    ax.set_yticks(test_yx)
-    ax.set_xticklabels([f"{val:.2f}" for val in test_fwhm])
-    ax.set_yticklabels([f"{val:.2f}" for val in test_yx])
-    ax.set_title('RMSE Projection (x, FWHM)')
-    fig.colorbar(im, ax=ax)
-
-    # isolate the RMSE cube projections for single variables
-
-    rmse_proj_x = np.squeeze(rmse_cube[test_yx==0, :, test_fwhm==0] ) # projection onto x offset
-    rmse_proj_y = np.squeeze(rmse_cube[:, test_yx==0, test_fwhm==0] ) # projection onto y offset
-    rmse_proj_f = np.squeeze(rmse_cube[test_yx==0, test_yx==0, :] ) # projection onto FWHM offset
+    return rmse_cube, test_yx, test_fwhm, dof
 
 
-    ax = axes[3]
-    im = ax.plot(test_yx,  rmse_proj_x)
-    ax.set_xlabel('x offset')
-    ax.set_ylabel('RMSE x')
-    ax.set_xticks(test_yx)
-    ax.set_xticklabels([f"{val:.2f}" for val in test_yx])
+def confidence_from_rmse_cube(rmse_cube, test_yx, test_fwhm, dof, sigma=1.0):
+    """
+    Turn an rmse_test() sensitivity grid into a 1D confidence interval per parameter (dx, dy,
+    fwhm), by treating the grid as a chi-square surface around the best fit (assumed to sit at
+    the grid center, i.e. where the tested offsets are 0) and finding where
+        delta_chi2 = dof * ((rmse / rmse_center)**2 - 1)
+    crosses `sigma**2` along each parameter's own 1D slice through the center (the other two
+    parameters held fixed at their best-fit value, not marginalized). `rmse_center` is the grid
+    value AT the center, not the grid's global minimum: the center is where the actual best fit
+    sits, and dof is typically in the thousands for real images, so anchoring to a nearby cell
+    that happens to dip slightly lower (grid/FFT numerical noise, or a dimension the actual fit
+    didn't vary -- e.g. offset when measure_psf() was called with offset=False) would get wildly
+    amplified into a spuriously large delta_chi2 at the center itself. Use qc_from_rmse_cube()'s
+    "minimum away from center" check to catch that situation instead of silently rescaling around
+    it here. `sigma**2` is the standard delta_chi2 threshold for a `sigma`-level interval on a
+    single interesting parameter (1 for 68%/1sigma, 4 for 95%/2sigma, ...). Same "reduced chi2 ~ 1
+    at the minimum" convention as _covariance_from_least_squares() -- there's no independently
+    known noise model here, so the absolute uncertainty scale is calibrated from the fit's own
+    residual scatter.
 
-    ax = axes[4]
-    im = ax.plot(test_yx,  rmse_proj_y)
-    ax.set_xlabel('y offset')
-    ax.set_ylabel('RMSE y')
-    ax.set_xticks(test_yx)
-    ax.set_xticklabels([f"{val:.2f}" for val in test_yx])
+    Args:
+        rmse_cube (np.ndarray): as returned by rmse_test().
+        test_yx (np.ndarray): as returned by rmse_test().
+        test_fwhm (np.ndarray): as returned by rmse_test().
+        dof (int): as returned by rmse_test().
+        sigma (float, optional): confidence level to report, in "number of sigma" for a single
+            parameter. Defaults to 1.0 (68%).
 
-    ax = axes[5]
-    im = ax.plot(test_fwhm, rmse_proj_f)
-    ax.set_xlabel('FWHM offset')
-    ax.set_ylabel('RMSE rot')
-    ax.set_xticks(test_fwhm)
-    ax.set_xticklabels([f"{val:.2f}" for val in test_fwhm])
+    Returns:
+        dict: {'dx': (lo, hi), 'dy': (lo, hi), 'fwhm': (lo, hi)}, offsets from the best fit (same
+        units/sign convention as test_yx/test_fwhm) bounding the requested confidence level. An
+        interval is (nan, nan) if dof <= 0 or if the grid never rises above the threshold on that
+        axis (delta_off/delta_fwhm too small relative to the true uncertainty -- very common for
+        large images, where the formal statistical uncertainty implied by thousands of pixels is
+        tiny compared to any grid spacing sensible for a diagnostic plot).
+    """
 
-    plt.tight_layout()
+    if dof is None or dof <= 0:
+        return {axis: (np.nan, np.nan) for axis in ('dx', 'dy', 'fwhm')}
 
-    _finalize_plot(fig, figname, save=save, show=show, dpi=300)
+    center_idx = tuple(len(axis) // 2 for axis in (test_yx, test_yx, test_fwhm))
+    rmse_center = rmse_cube[center_idx]
+    delta_chi2 = dof * ((rmse_cube / rmse_center) ** 2 - 1)
+    threshold = sigma ** 2
+
+    proj_x = np.squeeze(delta_chi2[test_yx == 0, :, test_fwhm == 0])
+    proj_y = np.squeeze(delta_chi2[:, test_yx == 0, test_fwhm == 0])
+    proj_f = np.squeeze(delta_chi2[test_yx == 0, test_yx == 0, :])
+
+    def _interval(grid, proj):
+        within = grid[proj <= threshold]
+        if within.size == 0:
+            return (np.nan, np.nan)
+        return (float(within.min()), float(within.max()))
+
+    return {
+        'dx': _interval(test_yx, proj_x),
+        'dy': _interval(test_yx, proj_y),
+        'fwhm': _interval(test_fwhm, proj_f),
+    }
+
+
+@dataclass
+class QCResult:
+    """Outcome of qc_from_rmse_cube(): whether the fit looks trustworthy, and why not if not."""
+    passed: bool
+    reasons: list
+
+
+def qc_from_rmse_cube(rmse_cube, test_yx, test_fwhm, fwhm0, dx0, dy0,
+                      fwhm_bound=(0.2, 2), dd_bound=(-2, 2),
+                      flatness_rel_threshold=0.01, bound_margin_rel=0.02):
+    """
+    Automated pass/fail quality check for a PSF fit, built on the same rmse_test() grid used by
+    confidence_from_rmse_cube(). What run_measure_psf() is ultimately measuring is the PSF
+    (FWHM), not the dx/dy registration between the two images -- so `passed` is driven only by
+    FWHM-related checks (1 and 2 below are evaluated on the 1D FWHM slice through the best fit,
+    i.e. holding dx=dy=0, not on the full 3D grid):
+
+    1. The RMSE minimum along the FWHM axis is not at the grid center (fwhm0, the best fit this
+       grid was centered on) -- suggests the optimizer may have converged to a different FWHM
+       than the one probed here.
+    2. The RMSE is nearly flat across the tested FWHM range -- suggests the FWHM is not well
+       constrained by the data (too few unmasked pixels, `edge` too aggressive, ...).
+    3. The best-fit FWHM sits close to one of its bounds -- consistent with what
+       run_measure_psf() already prints, surfaced here as an explicit, checkable flag.
+
+    dx/dy are still checked (grid minimum away from center anywhere in the full 3D cube, dx/dy
+    close to their bound) and reported in `reasons`, prefixed `[info]` -- but only as visibility
+    into the registration fit, never causing `passed` to be False on their own.
+
+    Note: alpha is not currently part of rmse_test()'s scanned grid (only fwhm/dx/dy are), so
+    this cannot check alpha's own constraint/bound-proximity even when the fit used
+    fit_alpha=True -- alpha only enters as the fixed value baked into the grid.
+
+    Args:
+        rmse_cube, test_yx, test_fwhm: as returned by rmse_test().
+        fwhm0, dx0, dy0 (float): the best-fit values this grid was centered on (same values
+            passed as fwhm0/dx0/dy0 to rmse_test()).
+        fwhm_bound, dd_bound (tuple, optional): the bounds actually used for the fit (see
+            _pack_bounds()), for the bound-proximity check.
+        flatness_rel_threshold (float, optional): minimum (max-min)/min relative RMSE variation
+            across the grid to consider a parameter constrained. Defaults to 0.01 (1%).
+        bound_margin_rel (float, optional): how close (as a fraction of the bound span) a
+            best-fit value has to be to a bound to be flagged. Defaults to 0.02 (2%).
+
+    Returns:
+        QCResult: `passed` is True iff none of the FWHM checks above triggered; `reasons` lists a
+        human-readable explanation for each one that did, plus any `[info]`-prefixed dx/dy
+        findings.
+    """
+
+    reasons = []
+    fwhm_ok = True
+
+    center_idx = tuple(len(axis) // 2 for axis in (test_yx, test_yx, test_fwhm))
+    fwhm_center_idx = len(test_fwhm) // 2
+
+    # 1D FWHM slice through the best fit (dx=dy=0): what actually constrains the PSF measurement,
+    # independent of how well dx/dy happen to be constrained.
+    proj_f = np.squeeze(rmse_cube[test_yx == 0, test_yx == 0, :])
+    fwhm_min_idx = np.argmin(proj_f)
+    if fwhm_min_idx != fwhm_center_idx:
+        reasons.append(
+            f'FWHM RMSE minimum is at offset {test_fwhm[fwhm_min_idx]:.3f}, not at the best fit '
+            '(0) -- the optimizer may have converged to a different FWHM than the one this grid '
+            'is centered on.'
+        )
+        fwhm_ok = False
+
+    rmse_center = rmse_cube[center_idx]
+    if rmse_center <= 0 or (proj_f.max() - rmse_center) / rmse_center < flatness_rel_threshold:
+        reasons.append(
+            'RMSE is nearly flat across the tested FWHM range -- the FWHM may not be well '
+            'constrained by the data (e.g. too few unmasked pixels, edge too aggressive).'
+        )
+        fwhm_ok = False
+
+    span_fwhm = fwhm_bound[1] - fwhm_bound[0]
+    if (fwhm0 - fwhm_bound[0] < bound_margin_rel * span_fwhm
+            or fwhm_bound[1] - fwhm0 < bound_margin_rel * span_fwhm):
+        reasons.append(f'Best-fit FWHM ({fwhm0:.3f}) is close to its bound {tuple(fwhm_bound)}.')
+        fwhm_ok = False
+
+    # dx/dy: informational only -- surfaced for visibility into the registration fit, but this
+    # function reports on the PSF (FWHM) fit quality, so these never affect `passed`.
+    min_idx = np.unravel_index(np.argmin(rmse_cube), rmse_cube.shape)
+    if min_idx != center_idx:
+        reasons.append(
+            f'[info] RMSE grid minimum is at index {min_idx}, not at the best fit (grid center, '
+            f'{center_idx}) -- likely driven by dx/dy (see the FWHM-specific check above).'
+        )
+
+    span_dd = dd_bound[1] - dd_bound[0]
+    for name, value in (('dx', dx0), ('dy', dy0)):
+        if (value - dd_bound[0] < bound_margin_rel * span_dd
+                or dd_bound[1] - value < bound_margin_rel * span_dd):
+            reasons.append(f'[info] Best-fit {name} offset ({value:.3f}) is close to its bound {tuple(dd_bound)}.')
+
+    return QCResult(passed=fwhm_ok, reasons=reasons)

@@ -9,8 +9,9 @@ from .image import Image
 import logging
 import os
 
-from .utils import check_flux_calibration, locate_stars, run_measure_psf
-from .plotting import plot_images, plot_psf
+from .utils import (check_flux_calibration, confidence_from_rmse_cube, locate_stars,
+                    qc_from_rmse_cube, rmse_test, run_measure_psf)
+from .plotting import plot_images, plot_psf, plot_qc_summary
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,12 @@ class MUSEImage(Image):
         best_fit_cov (np.ndarray):
             covariance matrix of best_fit (same ordering/length as best_fit), or a matrix of NaN
             if it could not be estimated (see utils._covariance_from_least_squares)
+        qc_confidence (dict):
+            only set if measure_psf(qc=True): per-parameter confidence intervals from
+            utils.confidence_from_rmse_cube(), e.g. {'fwhm': (lo, hi), 'dx': (lo, hi), 'dy': (lo, hi)}
+        qc (utils.QCResult):
+            only set if measure_psf(qc=True): automated pass/fail quality check from
+            utils.qc_from_rmse_cube(), with `.passed` (bool) and `.reasons` (list of str)
 
     Methods:
         measure_psf(reference: Image, fit_alpha=False, plot=False, save=False, show=True,
@@ -149,7 +156,7 @@ class MUSEImage(Image):
 
 
     def measure_psf(self, reference: Image, fit_alpha=False, plot=False, save=False, show=True,
-                    offset=False, oversample=None, **kwargs):
+                    offset=False, oversample=None, qc=False, **kwargs):
         """
         Measure the PSF of the image by using a cross-convolution technique to compare the
         MUSE image to a reference image with known PSF.
@@ -171,6 +178,17 @@ class MUSEImage(Image):
                 If True, fit an additional offset between the two images. Defaults to False.
             oversample (int, optional):
                 If not None, the image will be oversampled by this factor. Defaults to None.
+            qc (bool, optional):
+                If True, run an additional rmse_test() sensitivity scan around the best fit and
+                populate self.qc_confidence (confidence intervals per parameter) and self.qc
+                (automated pass/fail check with human-readable reasons). If `plot` is also True,
+                saves/shows a dedicated `..._qc.png` figure (utils.plot_qc_summary()) visualizing
+                the RMSE grid with the best fit vs. each panel's own minimum marked, the
+                confidence intervals shaded, and the PASS/FAIL verdict + reasons printed on it.
+                This re-evaluates the fit residual on a 3D grid (default 11**3 points), so it is
+                noticeably slower than the fit itself -- opt-in, not meant to run by default on
+                large batches. Not currently supported together with oversample>1. Defaults to
+                False.
         """
 
         if self.units != reference.units:
@@ -179,6 +197,12 @@ class MUSEImage(Image):
             raise ValueError('The reference PSF is missing')
         if reference.psfscale != np.around(self.wcs.proj_plane_pixel_scales()[0].to(u.arcsec).value, 3):
             raise ValueError('The PSF has been created with a different pixel scale')
+        if qc and oversample is not None and oversample > 1:
+            raise NotImplementedError(
+                'qc=True is not currently supported together with oversample>1 '
+                '(rmse_test() has no oversampling support of its own); call rmse_test() '
+                'manually if you need this.'
+            )
 
         self.suffix = kwargs.pop('suffix', '')
 
@@ -269,6 +293,26 @@ class MUSEImage(Image):
                                                                  **kwargs)
         self.best_fit = self.res.x
         self.best_fit_cov = self.res.cov
+
+        if qc:
+            logger.info('Running rmse_test() for quality control (this can be slower than the fit itself)...')
+            dx0_fit = self.best_fit[1] if offset else 0
+            dy0_fit = self.best_fit[2] if offset else 0
+            rmse_cube, test_yx, test_fwhm, dof = rmse_test(
+                data, ref_data, psf, self.starmask, self.zeromask,
+                fwhm0=self.best_fit[0], dx0=dx0_fit, dy0=dy0_fit,
+                alpha=alpha, edge=edge, scale=scale, plot=False, **kwargs)
+            self.qc_confidence = confidence_from_rmse_cube(rmse_cube, test_yx, test_fwhm, dof)
+            fwhm_bound = kwargs.get('fwhm_bound', [0.2, 2])
+            dd_bound = kwargs.get('dd_bound', [-2*oversample, 2*oversample])
+            self.qc = qc_from_rmse_cube(rmse_cube, test_yx, test_fwhm, self.best_fit[0],
+                                        dx0_fit, dy0_fit, fwhm_bound=fwhm_bound, dd_bound=dd_bound)
+
+            if plot:
+                qc_figname = os.path.join(self.qc_plot_dir,
+                                          self.filename.replace('.fits', f'{self.suffix}_qc.png'))
+                plot_qc_summary(rmse_cube, test_yx, test_fwhm, self.qc, self.qc_confidence,
+                                figname=qc_figname, save=save, show=show)
 
 
     def get_rot(self):

@@ -154,3 +154,122 @@ def test_measure_psf_recovers_injected_fwhm(write_fits, make_wcs_header, tmp_pat
                           mask_stars=False, resample=False, edge=10, fwhm0=0.5)
 
     assert muse_img.best_fit[0] == pytest.approx(true_fwhm, rel=0.05)
+
+
+@pytest.mark.filterwarnings('ignore::RuntimeWarning')
+def test_measure_psf_with_qc_populates_confidence_and_qc_flag(write_fits, make_wcs_header, tmp_path):
+    """
+    End-to-end test for measure_psf(qc=True) (Phase 2 of IMPLEMENTATION_PLAN.md): same synthetic
+    setup as test_measure_psf_recovers_injected_fwhm, checking that the rmse_test()-based QC
+    machinery runs on a real fit and produces sensible output ("clean pass" case).
+
+    Before KNOWN_ISSUES.md #14 was fixed, this exact synthetic pair needed offset=True here: with
+    offset=False, the fit (via the then-even-sized internal Moffat kernel) picked up a spurious
+    ~0.5 pixel registration offset that rmse_test()'s grid correctly flagged as "minimum not at
+    the best fit". That was itself a genuine demonstration the QC check works, just not what this
+    test is checking, so offset=True was used to remove the confound. #14 fixes the root cause
+    (verified: offset=False now also passes QC cleanly on this setup), but offset=True is kept
+    here anyway for the extra coverage of the offset-fitting + 3-parameter covariance path.
+    """
+    shape = (121, 121)
+    pixscale = 0.2
+    true_alpha = 2.8
+    true_fwhm = 0.9
+
+    rng = np.random.default_rng(1)
+    true_sky = np.zeros(shape)
+    n_sources = 6
+    ys = rng.integers(30, shape[0] - 30, n_sources)
+    xs = rng.integers(30, shape[1] - 30, n_sources)
+    true_sky[ys, xs] = rng.uniform(5, 20, n_sources)
+
+    psf_ref_kernel = moffat_kernel(0.4, true_alpha, scale=pixscale, img_size=41)
+    psf_muse_kernel = moffat_kernel(true_fwhm, true_alpha, scale=pixscale, img_size=41)
+
+    reference_data = convolve_fft(true_sky, psf_ref_kernel)
+    muse_data = convolve_fft(true_sky, psf_muse_kernel)
+
+    muse_input_dir, muse_fname = _write_muse_file(write_fits, make_wcs_header, 'muse.fits',
+                                                   muse_data, shape, pixscale)
+    ref_header = make_wcs_header(shape=shape, pixscale=pixscale)
+    ref_input_dir, ref_fname = write_fits('ref.fits', reference_data, ref_header, datahdu=0)
+
+    muse_img = MUSEImage(muse_fname, input_dir=muse_input_dir, output_dir=str(tmp_path),
+                          datahdu=1, headerhdu=0, units=MUSE_UNITS)
+    ref_img = Image(ref_fname, input_dir=ref_input_dir, output_dir=str(tmp_path),
+                     datahdu=0, units=MUSE_UNITS)
+    ref_img.psf = psf_ref_kernel.array
+    ref_img.psfscale = pixscale
+
+    muse_img.measure_psf(ref_img, fit_alpha=False, plot=False, save=False, show=False,
+                          mask_stars=False, resample=False, offset=True, edge=10, fwhm0=0.5,
+                          qc=True, num_points=5, delta_off=1, delta_fwhm=0.3)
+
+    lo, hi = muse_img.qc_confidence['fwhm']
+    assert lo <= 0 <= hi
+    assert muse_img.qc.passed
+    assert muse_img.qc.reasons == []
+
+
+@pytest.mark.filterwarnings('ignore::RuntimeWarning')
+def test_measure_psf_qc_saves_qc_summary_plot_when_requested(write_fits, make_wcs_header, tmp_path):
+    # measure_psf(qc=True, plot=True, save=True) should save the dedicated QC plot
+    # (utils.plot_qc_summary(), see MUSEImage.measure_psf's qc docstring) alongside the numeric
+    # qc/qc_confidence attributes -- same synthetic setup as the other qc=True tests above.
+    shape = (121, 121)
+    pixscale = 0.2
+    true_alpha = 2.8
+    true_fwhm = 0.9
+
+    rng = np.random.default_rng(1)
+    true_sky = np.zeros(shape)
+    n_sources = 6
+    ys = rng.integers(30, shape[0] - 30, n_sources)
+    xs = rng.integers(30, shape[1] - 30, n_sources)
+    true_sky[ys, xs] = rng.uniform(5, 20, n_sources)
+
+    psf_ref_kernel = moffat_kernel(0.4, true_alpha, scale=pixscale, img_size=41)
+    psf_muse_kernel = moffat_kernel(true_fwhm, true_alpha, scale=pixscale, img_size=41)
+
+    reference_data = convolve_fft(true_sky, psf_ref_kernel)
+    muse_data = convolve_fft(true_sky, psf_muse_kernel)
+
+    muse_input_dir, muse_fname = _write_muse_file(write_fits, make_wcs_header, 'muse.fits',
+                                                   muse_data, shape, pixscale)
+    ref_header = make_wcs_header(shape=shape, pixscale=pixscale)
+    ref_input_dir, ref_fname = write_fits('ref.fits', reference_data, ref_header, datahdu=0)
+
+    muse_img = MUSEImage(muse_fname, input_dir=muse_input_dir, output_dir=str(tmp_path),
+                          datahdu=1, headerhdu=0, units=MUSE_UNITS)
+    ref_img = Image(ref_fname, input_dir=ref_input_dir, output_dir=str(tmp_path),
+                     datahdu=0, units=MUSE_UNITS)
+    ref_img.psf = psf_ref_kernel.array
+    ref_img.psfscale = pixscale
+
+    muse_img.measure_psf(ref_img, fit_alpha=False, plot=True, save=True, show=False,
+                          mask_stars=False, resample=False, offset=True, edge=10, fwhm0=0.5,
+                          qc=True, num_points=5, delta_off=1, delta_fwhm=0.3)
+
+    assert os.path.isfile(os.path.join(str(tmp_path), 'plots', 'qc', 'muse_qc.png'))
+
+
+def test_measure_psf_qc_raises_with_oversample(write_fits, make_wcs_header, tmp_path):
+    # rmse_test() has no oversampling support, so qc=True + oversample>1 is not supported
+    # (see NotImplementedError in MUSEImage.measure_psf) rather than silently computing a QC
+    # grid in the wrong units.
+    shape = (41, 41)
+    pixscale = 0.2
+    input_dir, fname = _write_muse_file(write_fits, make_wcs_header, 'muse.fits',
+                                         np.zeros(shape), shape, pixscale)
+    muse_img = MUSEImage(fname, input_dir=input_dir, output_dir=str(tmp_path),
+                          datahdu=1, headerhdu=0, units=MUSE_UNITS)
+
+    ref_header = make_wcs_header(shape=shape, pixscale=pixscale)
+    ref_input_dir, ref_fname = write_fits('ref.fits', np.zeros(shape), ref_header, datahdu=0)
+    ref_img = Image(ref_fname, input_dir=ref_input_dir, output_dir=str(tmp_path),
+                    datahdu=0, units=MUSE_UNITS)
+    ref_img.psf = np.ones((5, 5)) / 25
+    ref_img.psfscale = pixscale
+
+    with pytest.raises(NotImplementedError, match='oversample'):
+        muse_img.measure_psf(ref_img, mask_stars=False, resample=False, qc=True, oversample=2)

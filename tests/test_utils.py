@@ -23,6 +23,9 @@ from musepsf.utils import (
     query_gaia,
     rebin,
     remove_close_stars,
+    confidence_from_rmse_cube,
+    qc_from_rmse_cube,
+    rmse_test,
     run_measure_psf,
     to_minimize,
 )
@@ -601,6 +604,216 @@ class TestRunMeasurePsfGoldenMaster:
 
         assert res.success
         assert res.x[0] == pytest.approx(2.0)
+
+
+def _synthetic_quadratic_rmse_cube(a, b, c, scale=1.0, shift_dx=0.0, shift_fwhm=0.0,
+                                   test_yx=None, test_fwhm=None):
+    """
+    Build an rmse_cube = scale * sqrt(1 + ((dx-shift_dx)/a)**2 + (dy/b)**2 +
+    ((df-shift_fwhm)/c)**2), i.e. a separable quadratic chi-square-like bowl with known per-axis
+    curvature, for testing confidence_from_rmse_cube()/qc_from_rmse_cube() against a known-answer
+    surface instead of against real fit data.
+    """
+    if test_yx is None:
+        test_yx = np.linspace(-2, 2, 11)
+    if test_fwhm is None:
+        test_fwhm = np.linspace(-0.5, 0.5, 11)
+
+    dy, dx, df = np.meshgrid(test_yx, test_yx, test_fwhm, indexing='ij')
+    rmse_cube = scale * np.sqrt(1 + ((dx - shift_dx) / a)**2 + (dy / b)**2
+                                + ((df - shift_fwhm) / c)**2)
+
+    return rmse_cube, test_yx, test_fwhm
+
+
+class TestConfidenceFromRmseCube:
+    def test_matches_analytic_quadratic_surface(self):
+        # a/b/c chosen so the sigma=1 (delta_chi2<=1) crossing falls clearly inside a grid cell
+        # (not on a grid point), so the expected interval is unambiguous.
+        a, b, c = 1.0, 1.5, 0.15
+        rmse_cube, test_yx, test_fwhm = _synthetic_quadratic_rmse_cube(a, b, c)
+
+        ci = confidence_from_rmse_cube(rmse_cube, test_yx, test_fwhm, dof=1, sigma=1.0)
+
+        assert ci['dx'] == pytest.approx((-0.8, 0.8))
+        assert ci['dy'] == pytest.approx((-1.2, 1.2))
+        assert ci['fwhm'] == pytest.approx((-0.1, 0.1))
+
+    def test_returns_nan_when_dof_is_not_positive(self):
+        rmse_cube, test_yx, test_fwhm = _synthetic_quadratic_rmse_cube(1.0, 1.5, 0.15)
+
+        ci = confidence_from_rmse_cube(rmse_cube, test_yx, test_fwhm, dof=0)
+
+        assert all(np.isnan(v) for bounds in ci.values() for v in bounds)
+
+
+class TestQcFromRmseCube:
+    def test_passes_on_a_well_behaved_grid(self):
+        rmse_cube, test_yx, test_fwhm = _synthetic_quadratic_rmse_cube(1.0, 1.5, 0.15)
+
+        qc = qc_from_rmse_cube(rmse_cube, test_yx, test_fwhm, fwhm0=1.0, dx0=0.0, dy0=0.0,
+                               fwhm_bound=(0.2, 2), dd_bound=(-2, 2))
+
+        assert qc.passed
+        assert qc.reasons == []
+
+    def test_flags_minimum_away_from_grid_center_along_fwhm_axis(self):
+        # shift_fwhm moves the true minimum one grid step away from the center (fwhm offset 0),
+        # which is where the fit's actual best fit (fwhm0) is assumed to sit -- this is a
+        # genuine PSF (FWHM) concern, so it must fail.
+        rmse_cube, test_yx, test_fwhm = _synthetic_quadratic_rmse_cube(1.0, 1.5, 0.15, shift_fwhm=0.1)
+
+        qc = qc_from_rmse_cube(rmse_cube, test_yx, test_fwhm, fwhm0=1.0, dx0=0.0, dy0=0.0,
+                               fwhm_bound=(0.2, 2), dd_bound=(-2, 2))
+
+        assert not qc.passed
+        assert any('FWHM RMSE minimum' in reason and 'not at the best fit' in reason
+                  for reason in qc.reasons)
+
+    def test_minimum_away_from_grid_center_along_dx_is_informational_only(self):
+        # Regression test: what matters for `passed` is the PSF (FWHM), not the dx/dy
+        # registration offset -- see the user's explicit request. shift_dx moves the true 3D
+        # minimum away from center, but the FWHM's own 1D slice through dx=dy=0 is still
+        # centered, so this must NOT fail; it should only be surfaced as an [info] reason.
+        rmse_cube, test_yx, test_fwhm = _synthetic_quadratic_rmse_cube(1.0, 1.5, 0.15, shift_dx=0.4)
+
+        qc = qc_from_rmse_cube(rmse_cube, test_yx, test_fwhm, fwhm0=1.0, dx0=0.0, dy0=0.0,
+                               fwhm_bound=(0.2, 2), dd_bound=(-2, 2))
+
+        assert qc.passed
+        assert any(reason.startswith('[info]') and 'not at the best fit' in reason
+                  for reason in qc.reasons)
+
+    def test_flags_flat_surface(self):
+        # same shape as the well-behaved grid, but scaled down so the RMSE barely varies across
+        # the grid (well under the 1% relative-variation threshold) -- the minimum stays exactly
+        # at the center, so only the flatness check should fire.
+        rmse_cube, test_yx, test_fwhm = _synthetic_quadratic_rmse_cube(1.0, 1.5, 0.15, scale=1e-6)
+        rmse_cube += 1.0  # keep values away from 0 so the relative-variation ratio is well-defined
+
+        qc = qc_from_rmse_cube(rmse_cube, test_yx, test_fwhm, fwhm0=1.0, dx0=0.0, dy0=0.0,
+                               fwhm_bound=(0.2, 2), dd_bound=(-2, 2))
+
+        assert not qc.passed
+        assert any('nearly flat' in reason for reason in qc.reasons)
+        assert not any('not at the best fit' in reason for reason in qc.reasons)
+
+    def test_flags_best_fit_close_to_bound(self):
+        rmse_cube, test_yx, test_fwhm = _synthetic_quadratic_rmse_cube(1.0, 1.5, 0.15)
+
+        qc = qc_from_rmse_cube(rmse_cube, test_yx, test_fwhm, fwhm0=1.97, dx0=0.0, dy0=0.0,
+                               fwhm_bound=(0.2, 2), dd_bound=(-2, 2))
+
+        assert not qc.passed
+        assert any('close to its bound' in reason for reason in qc.reasons)
+
+    def test_dx_dy_close_to_bound_is_informational_only(self):
+        # Regression test: dx/dy close to their bound used to fail the QC flag; now it's only
+        # surfaced as an [info] reason, since `passed` reports on the PSF (FWHM) fit quality.
+        rmse_cube, test_yx, test_fwhm = _synthetic_quadratic_rmse_cube(1.0, 1.5, 0.15)
+
+        qc = qc_from_rmse_cube(rmse_cube, test_yx, test_fwhm, fwhm0=1.0, dx0=1.99, dy0=-1.99,
+                               fwhm_bound=(0.2, 2), dd_bound=(-2, 2))
+
+        assert qc.passed
+        assert any(reason.startswith('[info]') and 'dx offset' in reason for reason in qc.reasons)
+        assert any(reason.startswith('[info]') and 'dy offset' in reason for reason in qc.reasons)
+
+
+class TestRmseTest:
+    def test_runs_without_error_on_synthetic_case(self):
+        data, reference_data, psf_ref, zeromask, starmask, scale, true_alpha = _build_synthetic_fit_case()
+
+        rmse_cube, test_yx, test_fwhm, dof = rmse_test(
+            data, reference_data, psf_ref, starmask, zeromask,
+            fwhm0=0.83, dx0=0, dy0=0, figname=None, alpha=true_alpha, edge=10,
+            save=False, show=False, scale=scale, delta_off=0.5, delta_fwhm=0.1, num_points=3,
+        )
+
+        assert rmse_cube.shape == (3, 3, 3)
+        assert test_yx.shape == (3,)
+        assert test_fwhm.shape == (3,)
+        assert dof > 0
+
+    def test_plot_false_skips_plotting_and_still_returns_the_grid(self, monkeypatch):
+        # Phase 2: plot=False must let the grid be computed for quality-control purposes
+        # without the (mandatory, before Phase 2) plotting side effect.
+        data, reference_data, psf_ref, zeromask, starmask, scale, true_alpha = _build_synthetic_fit_case()
+
+        def _boom(*args, **kwargs):
+            raise AssertionError('plotting should be skipped when plot=False')
+
+        monkeypatch.setattr('musepsf.utils._plot_rmse_cube', _boom)
+
+        rmse_cube, test_yx, test_fwhm, dof = rmse_test(
+            data, reference_data, psf_ref, starmask, zeromask,
+            fwhm0=0.83, dx0=0, dy0=0, figname=None, alpha=true_alpha, edge=10,
+            save=False, show=False, scale=scale, plot=False,
+            delta_off=0.5, delta_fwhm=0.1, num_points=3,
+        )
+
+        assert rmse_cube.shape == (3, 3, 3)
+
+    def test_uses_the_passed_scale_not_a_hardcoded_default(self, monkeypatch):
+        # Regression test for KNOWN_ISSUES.md #13: rmse_test() used to hardcode scale=0.2 in its
+        # internal to_minimize() calls regardless of the `scale` argument it was given.
+        data, reference_data, psf_ref, zeromask, starmask, _, true_alpha = _build_synthetic_fit_case()
+
+        real_to_minimize = to_minimize
+        seen_scales = []
+
+        def _spy(pars, convolved, reference, ctx, alpha0=None):
+            seen_scales.append(ctx.scale)
+            return real_to_minimize(pars, convolved, reference, ctx, alpha0=alpha0)
+
+        monkeypatch.setattr('musepsf.utils.to_minimize', _spy)
+
+        rmse_test(
+            data, reference_data, psf_ref, starmask, zeromask,
+            fwhm0=0.83, dx0=0, dy0=0, figname=None, alpha=true_alpha, edge=10,
+            save=False, show=False, scale=0.15, delta_off=0.5, delta_fwhm=0.1, num_points=3,
+        )
+
+        assert seen_scales
+        assert all(s == pytest.approx(0.15) for s in seen_scales)
+
+    def test_grid_scan_is_not_corrupted_by_bounds_penalty_when_offset_exceeds_default_bound(self):
+        # Regression test for KNOWN_ISSUES.md #15: rmse_test() used to build its FitContext with
+        # to_minimize()'s bounds-penalty defaults (fwhm_bound=[0.4, 2], dd_bound=[-2, 2]) still
+        # active. to_minimize()'s bound check exists to steer scipy.optimize.least_squares() away
+        # from out-of-bounds guesses -- but least_squares() enforces `bounds=` natively and never
+        # calls to_minimize() outside them, so the check is dead code for the actual fit. This
+        # grid scan calls to_minimize() directly with points meant to go beyond the best fit by
+        # construction, so any grid point where dx0/dy0/fwhm0 + offset crossed the hardcoded
+        # default bound got its residual multiplied by 1e10 -- not a measure of fit quality.
+        # dx0=1.7/dy0=-1.8 (a plausible offset='True' best fit) combined with the default
+        # delta_off=2 pushes most of the grid past the old hardcoded [-2, 2] bound.
+        data, reference_data, psf_ref, zeromask, starmask, scale, true_alpha = _build_synthetic_fit_case()
+
+        rmse_cube, test_yx, test_fwhm, dof = rmse_test(
+            data, reference_data, psf_ref, starmask, zeromask,
+            fwhm0=0.83, dx0=1.7, dy0=-1.8, figname=None, alpha=true_alpha, edge=10,
+            save=False, show=False, scale=scale, plot=False,
+        )
+
+        # before the fix, contaminated cells reached ~1e8-1e11; a genuine RMSE surface for this
+        # synthetic case stays well under 1.
+        assert rmse_cube.max() < 10
+
+    def test_grid_scan_handles_fwhm_going_non_positive_at_grid_edge(self):
+        # moffat_kernel() needs fwhm > 0 (astropy's Moffat2DKernel requires gamma > 0). Now that
+        # the grid scan no longer relies on to_minimize()'s bounds clipping to keep fwhm sane
+        # (previous test), it must guard fwhm0 + df going non-positive itself.
+        data, reference_data, psf_ref, zeromask, starmask, scale, true_alpha = _build_synthetic_fit_case()
+
+        rmse_cube, test_yx, test_fwhm, dof = rmse_test(
+            data, reference_data, psf_ref, starmask, zeromask,
+            fwhm0=0.2, dx0=0, dy0=0, figname=None, alpha=true_alpha, edge=10,
+            save=False, show=False, scale=scale, plot=False,
+            delta_off=0.5, delta_fwhm=0.5, num_points=3,
+        )
+
+        assert np.isfinite(rmse_cube).all()
 
 
 def test_download_ps_file_builds_expected_url_and_calls_wget(mock_wget_download, tmp_path):
