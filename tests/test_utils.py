@@ -15,7 +15,6 @@ from musepsf.utils import (
     download_ps_file,
     find_peaks_2d,
     fit_2D_psf,
-    get_norm,
     linear_function,
     locate_stars,
     moffat_kernel,
@@ -23,6 +22,7 @@ from musepsf.utils import (
     rebin,
     remove_close_stars,
 )
+from musepsf.plotting import get_norm
 
 
 def test_linear_function():

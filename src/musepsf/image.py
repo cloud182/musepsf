@@ -16,12 +16,15 @@ from regions import EllipseSkyRegion
 from photutils.psf import EPSFBuilder
 from mpdaf.obj import Image as MPDAFImage
 
+import logging
 import sys
 import os
 import warnings
 
-from .utils import (query_gaia, create_sdss_psf, plot_psf, find_peaks_2d, remove_close_stars,
-                     fit_2D_psf, _finalize_plot)
+from .utils import (query_gaia, create_sdss_psf, find_peaks_2d, remove_close_stars, fit_2D_psf)
+from .plotting import plot_psf, _finalize_plot
+
+logger = logging.getLogger(__name__)
 
 class Image:
     """
@@ -177,7 +180,7 @@ class Image:
 
 
         if pixscale is not None:
-            print('Using MPDAF to resample the image')
+            logger.info('Using MPDAF to resample the image')
             image = MPDAFImage(filename=os.path.join(self.input_dir, self.filename))
             image.crop()
             scale = image.get_step() * 3600
@@ -242,7 +245,7 @@ class Image:
 
         # selecting based on the G magnitude
         mask1 = (gaia_cat['phot_g_mean_mag'] >= gmin) * (gaia_cat['phot_g_mean_mag'] <= gmax)
-        print(f'Selecting stars between {gmin} and {gmax} G mag')
+        logger.info(f'Selecting stars between {gmin} and {gmax} G mag')
         gaia_cat = gaia_cat[mask1].copy()
         coords = coords[mask1].copy()
 
@@ -493,7 +496,7 @@ class Image:
                 Equivalency used to transform flux density units to flux units. Defaults to None.
         """
 
-        print(f'Updating the units from {self.units} to {out_units}')
+        logger.info(f'Updating the units from {self.units} to {out_units}')
         tmp_image = self.data * self.units
         tmp_image = tmp_image.to(out_units, equivalencies=equivalency)
         self.data = tmp_image.value

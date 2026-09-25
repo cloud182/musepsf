@@ -6,9 +6,13 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import rotate, zoom
 from .image import Image
 
+import logging
 import os
 
-from .utils import plot_images, run_measure_psf, locate_stars, plot_psf, check_flux_calibration
+from .utils import check_flux_calibration, locate_stars, run_measure_psf
+from .plotting import plot_images, plot_psf
+
+logger = logging.getLogger(__name__)
 
 
 class MUSEImage(Image):
@@ -186,7 +190,7 @@ class MUSEImage(Image):
 
         if mask_stars:
             if os.path.isfile(reg_name):
-                print('Including manually selected sources')
+                logger.info('Including manually selected sources')
                 star_pos, self.starmask = locate_stars(data, filename=reg_name, **kwargs)
             else:
                 star_pos, self.starmask = locate_stars(data, filename=None, **kwargs)
@@ -202,7 +206,7 @@ class MUSEImage(Image):
 
         # apply rotation to the PSF
         if img_rot != 0:
-            print(f'A rotation of {img_rot:0.1f} deg has been detected. Applying rotation to PSF')
+            logger.info(f'A rotation of {img_rot:0.1f} deg has been detected. Applying rotation to PSF')
             psf = rotate(reference.psf, img_rot)
         else:
             psf = reference.psf
