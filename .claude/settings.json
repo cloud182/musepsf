@@ -10,7 +10,13 @@
       "Bash(python3 -c ' *)",
       "Bash(python3 -c \"import musepsf; from musepsf.image import Image; from musepsf.musepsf import MUSEImage; print\\('import OK'\\)\")",
       "Bash(python -m pytest tests/test_image.py tests/test_utils.py -q)",
-      "Bash(python -m pytest tests/ -q)"
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(python -c \"import scipy; print\\(scipy.__version__\\)\")",
+      "Bash(python -c \"import musepsf; print\\('ok'\\)\")",
+      "Bash(mkdir -p /tmp/claude-8904/-home-econgiu-Data-PHANGS-development-musepsf/d5d2616b-6b90-4355-a6f8-d44cc8b2e4c7/scratchpad)",
+      "Bash(python /tmp/claude-8904/-home-econgiu-Data-PHANGS-development-musepsf/d5d2616b-6b90-4355-a6f8-d44cc8b2e4c7/scratchpad/try_fit.py)",
+      "Bash(python /tmp/claude-8904/-home-econgiu-Data-PHANGS-development-musepsf/d5d2616b-6b90-4355-a6f8-d44cc8b2e4c7/scratchpad/try_fit2.py)",
+      "Bash(python /tmp/claude-8904/-home-econgiu-Data-PHANGS-development-musepsf/d5d2616b-6b90-4355-a6f8-d44cc8b2e4c7/scratchpad/try_fit3.py)"
     ]
   }
 }
