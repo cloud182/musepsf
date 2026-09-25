@@ -73,10 +73,14 @@ class MUSEImage(Image):
             image convolved with the PSF of the reference image
         alpha (float):
             first guess for the power index of the Moffat PSF
-        res (list):
-            full output of the fitting routine
+        res (scipy.optimize.OptimizeResult):
+            full output of the fitting routine, with an extra `.cov` attribute holding the
+            parameter covariance matrix
         best_fit (list):
             best fitting parameters
+        best_fit_cov (np.ndarray):
+            covariance matrix of best_fit (same ordering/length as best_fit), or a matrix of NaN
+            if it could not be estimated (see utils._covariance_from_least_squares)
 
     Methods:
         measure_psf(reference: Image, fit_alpha=False, plot=False, save=False, show=True,
@@ -263,7 +267,8 @@ class MUSEImage(Image):
                                                                  plot=plot, save=save,
                                                                  edge=edge, dx0=dx0, dy0=dy0,
                                                                  **kwargs)
-        self.best_fit = self.res[0]
+        self.best_fit = self.res.x
+        self.best_fit_cov = self.res.cov
 
 
     def get_rot(self):

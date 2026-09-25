@@ -10,13 +10,14 @@ from astropy.convolution import Moffat2DKernel, convolve_fft
 from astropy.stats import sigma_clipped_stats
 from photutils.detection import DAOStarFinder
 from astropy.modeling import models, fitting
-from scipy.optimize import leastsq
+from scipy.optimize import least_squares
 from scipy.ndimage import zoom, binary_dilation, binary_fill_holes
 from scipy.ndimage import maximum_filter, gaussian_filter
 from numpy.fft import fftfreq
 from scipy.spatial import cKDTree
 from scipy.odr import ODR, Model, RealData
 
+from dataclasses import dataclass
 from itertools import product
 
 import logging
@@ -199,7 +200,7 @@ def apply_mask(image, starmask, nanmask):
 
 def _unpack_fit_params(pars, alpha0=None):
     """
-    Unpack the leastsq parameter vector shared by to_minimize() and plot_results().
+    Unpack the least_squares parameter vector shared by to_minimize() and plot_results().
 
     Depending on which of fwhm/offset/alpha are being fit, `pars` has length 1 (fwhm
     only), 2 (fwhm, alpha), 3 (fwhm, dx, dy) or 4 (fwhm, dx, dy, alpha).
@@ -219,8 +220,73 @@ def _unpack_fit_params(pars, alpha0=None):
     return fwhm, alpha, dx, dy
 
 
-def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, oversample, alpha0=None,
-                fwhm_bound=[0.4, 2], alpha_bound=[1, 10], dd_bound=[-2, 2], scale=0.2):
+@dataclass
+class FitContext:
+    """
+    Precomputed, per-call state shared by to_minimize(), plot_results() and rmse_test()'s grid
+    scan: the star/zero masks, the FFT frequency grid and array slices apply_offset_fourier()
+    needs, and the parameter bounds. Built once per run_measure_psf()/rmse_test() call by
+    _prepare_fit_arrays(), then threaded through unchanged -- replaces what used to be 8+
+    separate positional arguments passed by hand to each of those functions.
+    """
+    starmask: np.ndarray
+    nanmask: np.ndarray
+    fxx: np.ndarray
+    fyy: np.ndarray
+    arrayslices: list
+    oversample: int
+    scale: float
+    fwhm_bound: list
+    alpha_bound: list
+    dd_bound: list
+
+
+def _pack_bounds(fit_alpha, offset, fwhm_bound, alpha_bound, dd_bound):
+    """
+    Build the (lower, upper) bound sequences for least_squares(), matching the same
+    fwhm/[alpha]/[dx, dy] parameter ordering that _unpack_fit_params() decodes and that
+    run_measure_psf() uses to build the initial guess p0, for a given combination of
+    fit_alpha/offset.
+    """
+    if offset:
+        if fit_alpha:
+            lower = [fwhm_bound[0], dd_bound[0], dd_bound[0], alpha_bound[0]]
+            upper = [fwhm_bound[1], dd_bound[1], dd_bound[1], alpha_bound[1]]
+        else:
+            lower = [fwhm_bound[0], dd_bound[0], dd_bound[0]]
+            upper = [fwhm_bound[1], dd_bound[1], dd_bound[1]]
+    else:
+        if fit_alpha:
+            lower = [fwhm_bound[0], alpha_bound[0]]
+            upper = [fwhm_bound[1], alpha_bound[1]]
+        else:
+            lower = [fwhm_bound[0]]
+            upper = [fwhm_bound[1]]
+
+    return lower, upper
+
+
+def _covariance_from_least_squares(res):
+    """
+    Parameter covariance matrix from a scipy.optimize.least_squares() result, following the
+    same convention as scipy.optimize.curve_fit(absolute_sigma=False):
+    cov = inv(J^T J) * (2*cost/dof). Returns a matrix of NaN (same shape) if there are not
+    enough data points to constrain the fit (dof <= 0) or if J^T J is singular.
+    """
+    npars = res.x.size
+    dof = res.fun.size - npars
+
+    if dof <= 0:
+        return np.full((npars, npars), np.nan)
+
+    s_sq = 2 * res.cost / dof
+    try:
+        return np.linalg.inv(res.jac.T @ res.jac) * s_sq
+    except np.linalg.LinAlgError:
+        return np.full((npars, npars), np.nan)
+
+
+def to_minimize(pars, convolved, reference, ctx, alpha0=None):
     """
     Compute the function to be minimize to measure the PSF properties
 
@@ -232,23 +298,16 @@ def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arraysl
             reference image.
         reference (np.ndarray):
             reference image
-        starmask (np.ndarray):
-            boolean mask selecting the pixels associated to stellar emission that should be masked.
-        edge (int, optional):
-            number of pixels at the edge of the image to be ignored during minimization.
-            Defaults to 50.
+        ctx (FitContext):
+            precomputed masks/FFT grid/bounds shared across calls, see FitContext and
+            _prepare_fit_arrays().
         alpha0 (float, optional):
             Value of alpha if not among the fittted parameters. Defaults to None.
-        fwhm_bound (list, optional):
-            minimum and maximum limits that the FWHM parameter can assume. Defaults to [0.4, 2].
-        alpha_bound (list, optional):
-            minimum and maximum limits that the alpha parameter can assume.. Defaults to [1, 10].
-        scale (float, optional):
-            pixel scale of the images. Defaults to 0.2.
 
     Returns:
         np.ndarray:
-            Function needed for the minimization
+            1D array of residuals for the unmasked pixels only (masked pixels -- star mask,
+            edges, zeros -- are dropped via .compressed(), not just zeroed out).
     """
 
     fwhm, alpha, dx, dy = _unpack_fit_params(pars, alpha0)
@@ -256,49 +315,56 @@ def to_minimize(pars, convolved, reference, starmask, nanmask, fxx, fyy, arraysl
     factor = 1 #this is a factor that will be used to return very high numbers if the
                 #parameters are out of bounds
 
-    if fwhm_bound is not None:
-        if fwhm < fwhm_bound[0] or fwhm > fwhm_bound[1]:
+    if ctx.fwhm_bound is not None:
+        if fwhm < ctx.fwhm_bound[0] or fwhm > ctx.fwhm_bound[1]:
             fwhm = 0.4
             factor = 1e10
-    if alpha_bound is not None:
-        if alpha < alpha_bound[0] or alpha > alpha_bound[1]:
+    if ctx.alpha_bound is not None:
+        if alpha < ctx.alpha_bound[0] or alpha > ctx.alpha_bound[1]:
             alpha = 2
             factor = 1e10
-    if dd_bound is not None:
-         if dx < dd_bound[0] or dx > dd_bound[1]:
+    if ctx.dd_bound is not None:
+         if dx < ctx.dd_bound[0] or dx > ctx.dd_bound[1]:
             dx = 0
             factor = 1e10
-         if dy < dd_bound[0] or dy > dd_bound[1]:
+         if dy < ctx.dd_bound[0] or dy > ctx.dd_bound[1]:
             dy = 0
             factor = 1e10
 
 
     # creating model of MUSE PSF
-    ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=50*oversample)
+    # img_size must be odd: convolve_fft() centers an even-sized kernel array at a half-pixel
+    # offset from the true center (verified empirically -- see KNOWN_ISSUES.md #14), which would
+    # otherwise leak into the fitted dx/dy as a spurious ~0.5 pixel bias.
+    ker_MUSE = moffat_kernel(fwhm, alpha, scale=ctx.scale, img_size=50*ctx.oversample + 1)
 
     # convolving WFI image for the model of MUSE PSF
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
-    # import sys; sys.exit()
 
-    if oversample > 1:
-        reference_conv = apply_offset_fourier(reference_conv, dx*oversample, dy*oversample, fxx, fyy, arrayslices)
+    if ctx.oversample > 1:
+        reference_conv = apply_offset_fourier(reference_conv, dx*ctx.oversample, dy*ctx.oversample,
+                                              ctx.fxx, ctx.fyy, ctx.arrayslices)
     else:
-        reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
+        reference_conv = apply_offset_fourier(reference_conv, dx, dy, ctx.fxx, ctx.fyy, ctx.arrayslices)
 
-    if oversample > 1:
-        reference_conv = rebin(reference_conv, oversample)
+    if ctx.oversample > 1:
+        reference_conv = rebin(reference_conv, ctx.oversample)
 
-    if reference_conv.shape != starmask.shape:
+    if reference_conv.shape != ctx.starmask.shape:
         raise ValueError('Starmask and reference_conv have different shapes')
     if reference_conv.shape != convolved.shape:
         raise ValueError('Convolved and reference_conv have different shapes')
 
-    ref_masked = apply_mask(reference_conv, starmask, nanmask)
+    ref_masked = apply_mask(reference_conv, ctx.starmask, ctx.nanmask)
 
-    # leastsq requires the array of residuals to be minimized
+    # the optimizer needs a plain array of residuals: .compressed() drops the masked
+    # pixels entirely (star mask / edges / zeros), rather than just hiding them behind
+    # a MaskedArray. A MaskedArray here would NOT actually exclude them from the fit --
+    # leastsq/least_squares coerce the return value with np.asarray(), which silently
+    # discards the mask and keeps the underlying (masked) data values. See KNOWN_ISSUES.md #12.
     function = (convolved-ref_masked)
 
-    return function.ravel() * factor
+    return function.compressed() * factor
 
 def apply_offset_fourier(convolved, dx, dy, fxx, fyy, arrayslices):
 
@@ -312,10 +378,15 @@ def apply_offset_fourier(convolved, dx, dy, fxx, fyy, arrayslices):
 
 
 
-def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrayslices, figname, oversample, save=False, show=False,
-                 edge=50, alpha0=None, scale=0.2):
+def plot_results(pars, convolved, reference, ctx, figname, alpha0=None, save=False, show=False):
     """
     Functions that plot the final results of the PSF fitting
+
+    Kept in utils.py rather than moved to plotting.py (Phase 4 of IMPLEMENTATION_PLAN.md): unlike
+    the other plotting helpers, this one first reconstructs the fit model from `pars`/`ctx` using
+    to_minimize()'s own machinery (moffat_kernel, apply_offset_fourier, rebin, apply_mask) before
+    rendering it -- moving it would make plotting.py import back from utils.py, which already
+    imports from plotting.py, creating a circular import.
 
     Args:
         pars (list):
@@ -325,36 +396,32 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
             reference image.
         reference (np.ndarray):
             reference image
-        starmask (np.ndarray):
-            boolean mask selecting the pixels associated to stellar emission that should be masked.
+        ctx (FitContext):
+            precomputed masks/FFT grid/bounds shared across calls, see FitContext and
+            _prepare_fit_arrays().
         figname (str):
             figure name.
+        alpha0 (float, optional):
+            Value of alpha if not among the fittted parameters. Defaults to None.
         save (bool, optional):
             if True, save the plot. Defaults to False.
         show (bool, optional):
             if True, show the plot. Defaults to False.
-        edge (int, optional):
-            number of pixels at the edge of the image to be ignored during minimization.
-            Defaults to 50.
-        alpha0 (float, optional):
-            Value of alpha if not among the fittted parameters. Defaults to None.
-        scale (float, optional):
-            pixel scale of the images. Defaults to 0.2.
     """
 
     fwhm, alpha, dx, dy = _unpack_fit_params(pars, alpha0)
 
-    # creating model of MUSE PSF
-    ker_MUSE = moffat_kernel(fwhm, alpha, scale=scale, img_size=50*oversample)
+    # creating model of MUSE PSF (img_size must be odd, see the matching comment in to_minimize())
+    ker_MUSE = moffat_kernel(fwhm, alpha, scale=ctx.scale, img_size=50*ctx.oversample + 1)
 
     # convolving WFI image for the model of MUSE PSF
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
-    reference_conv = apply_offset_fourier(reference_conv, dx, dy, fxx, fyy, arrayslices)
+    reference_conv = apply_offset_fourier(reference_conv, dx, dy, ctx.fxx, ctx.fyy, ctx.arrayslices)
 
-    if oversample > 1:
-        reference_conv = rebin(reference_conv, oversample)
+    if ctx.oversample > 1:
+        reference_conv = rebin(reference_conv, ctx.oversample)
 
-    ref_masked = apply_mask(reference_conv, starmask, nanmask)
+    ref_masked = apply_mask(reference_conv, ctx.starmask, ctx.nanmask)
 
     # plotting the results of the convolution
 
@@ -408,11 +475,15 @@ def plot_results(pars, convolved, reference, starmask, nanmask, fxx, fyy, arrays
     plt.tight_layout()
     _finalize_plot(fig, figname, save=save, show=show, dpi=150)
 
-def _prepare_fit_arrays(reference, zeromask, starmask, edge, scale, oversample=1):
+def _prepare_fit_arrays(reference, zeromask, starmask, edge, scale, oversample=1,
+                        fwhm_bound=[0.4, 2], alpha_bound=[1, 10], dd_bound=[-2, 2]):
     """
     Shared setup for the PSF-fitting minimization, used by both run_measure_psf() and
     rmse_test(): fills mask holes, dilates the zero/edge mask by `edge` pixels, and builds
-    the FFT frequency grid and array slices needed by apply_offset_fourier().
+    the FFT frequency grid and array slices needed by apply_offset_fourier(). Returns a
+    FitContext bundling all of that together with `scale` and the parameter bounds -- the
+    fwhm_bound/alpha_bound/dd_bound defaults here match to_minimize()'s previous defaults, used
+    whenever a caller (e.g. rmse_test()) doesn't override them explicitly.
     """
 
     # filling eventual holes in the masks caused by the resampling
@@ -436,7 +507,9 @@ def _prepare_fit_arrays(reference, zeromask, starmask, edge, scale, oversample=1
     # creating model of MUSE PSF
     # I need this to make sure I create the fxx and fyy correctly.
     # maybe it could be removed?
-    ker_MUSE = moffat_kernel(1, 2.8, scale=scale, img_size=50*oversample)
+    # img_size must match to_minimize()/plot_results() exactly (odd, see comment there) so the
+    # fxx/fyy/arrayslices derived from its shape here stay valid for their own kernels.
+    ker_MUSE = moffat_kernel(1, 2.8, scale=scale, img_size=50*oversample + 1)
     # convolving WFI image for the model of MUSE PSF This is needed only to compute the array slices
     reference_conv = convolve_fft(reference, ker_MUSE, return_fft=True)
 
@@ -450,7 +523,9 @@ def _prepare_fit_arrays(reference, zeromask, starmask, edge, scale, oversample=1
         center = dimension_conv - (dimension_conv + 1) // 2
         arrayslices += [center - dimension // 2, center + (dimension + 1) // 2]
 
-    return zeromask, starmask, fxx, fyy, arrayslices
+    return FitContext(starmask=starmask, nanmask=zeromask, fxx=fxx, fyy=fyy, arrayslices=arrayslices,
+                      oversample=oversample, scale=scale, fwhm_bound=fwhm_bound,
+                      alpha_bound=alpha_bound, dd_bound=dd_bound)
 
 
 def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversample, figname=None, alpha=2.8,
@@ -488,16 +563,21 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
             Scale fo the data array. Defaults to 0.2.
 
     Returns:
-        dict:
-            full results of the fit
+        scipy.optimize.OptimizeResult:
+            full result of the fit (from scipy.optimize.least_squares), with an extra `.cov`
+            attribute holding the parameter covariance matrix (see _covariance_from_least_squares).
         (astropy.table.Table, None):
             Table contasining the position of the masked stars
         np.ndarray:
             boolean mask selecting the pixels associated to stellar emission that should be masked.
     """
 
-    zeromask, starmask, fxx, fyy, arrayslices = _prepare_fit_arrays(
-        reference, zeromask, starmask, edge, scale, oversample=oversample)
+    fwhm_bound = kwargs.get('fwhm_bound', [0.2, 2])
+    alpha_bound = kwargs.get('alpha_bound', [1, 10])
+    dd_bound = kwargs.get('dd_bound', [-2*oversample, 2*oversample])
+
+    ctx = _prepare_fit_arrays(reference, zeromask, starmask, edge, scale, oversample=oversample,
+                              fwhm_bound=fwhm_bound, alpha_bound=alpha_bound, dd_bound=dd_bound)
 
     # convolving MUSE for the reference PSF
     convolved = convolve_fft(data, psf)
@@ -505,17 +585,14 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
     if oversample > 1:
         convolved = rebin(convolved, oversample)
 
-    if convolved.shape != starmask.shape:
+    if convolved.shape != ctx.starmask.shape:
         raise ValueError('Convolved and starmask have different shapes')
 
-    convolved = apply_mask(convolved, starmask, zeromask)
+    convolved = apply_mask(convolved, ctx.starmask, ctx.nanmask)
 
-    print(f'Using alpha = {alpha}')
+    logger.info(f'Using alpha = {alpha}')
 
-    print('Performing the fit')
-    fwhm_bound = kwargs.get('fwhm_bound', [0.2, 2])
-    alpha_bound = kwargs.get('alpha_bound', [1, 10])
-    dd_bound = kwargs.get('dd_bound', [-2*oversample, 2*oversample])
+    logger.info('Performing the fit')
     # it is possible to fit the alpha parameter or to assume a fixed value
     if offset:
         if fit_alpha:
@@ -528,27 +605,26 @@ def run_measure_psf(data, reference, psf, star_pos, starmask, zeromask, oversamp
         else:
             p0=[fwhm0]
 
-    res = leastsq(to_minimize, x0=p0,
-                #convolved, reference, starmask, edge, alpha0, fwhm_bound,
-                # alpha_bound, scale
-                args=(convolved, reference, starmask, zeromask, fxx, fyy, arrayslices, oversample, alpha, fwhm_bound,
-                        alpha_bound, dd_bound, scale),
-                maxfev=600, xtol=1e-9, full_output=True)
+    bounds = _pack_bounds(fit_alpha, offset, fwhm_bound, alpha_bound, dd_bound)
 
-    best_fit = res[0]
+    res = least_squares(to_minimize, x0=p0, bounds=bounds,
+                args=(convolved, reference, ctx, alpha),
+                max_nfev=600, xtol=1e-9)
+    res.cov = _covariance_from_least_squares(res)
 
-    print('Fit completed')
-    print(f'Measured FWHM = {best_fit[0]:0.3f}')
+    best_fit = res.x
+
+    logger.info('Fit completed')
+    logger.info(f'Measured FWHM = {best_fit[0]:0.3f}')
     if offset:
-        print(f'Measured offset x:{best_fit[1]:0.3f} y:{best_fit[2]:0.3f}')
+        logger.info(f'Measured offset x:{best_fit[1]:0.3f} y:{best_fit[2]:0.3f}')
     if fit_alpha:
-        print(f'Measured alpha = {best_fit[-1]:0.3f}')
+        logger.info(f'Measured alpha = {best_fit[-1]:0.3f}')
 
     if plot:
-        plot_results(best_fit, convolved, reference, starmask, zeromask, fxx, fyy, arrayslices, oversample=oversample,
-                     save=save, show=show, figname=figname, edge=edge, alpha0=alpha)
+        plot_results(best_fit, convolved, reference, ctx, figname, alpha0=alpha, save=save, show=show)
 
-    return res, star_pos, starmask
+    return res, star_pos, ctx.starmask
 
 
 def download_ps_file(run, camcol, frame, rerun, out_dir="ps_field"):

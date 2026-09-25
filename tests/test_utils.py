@@ -3,9 +3,11 @@ import pytest
 
 import astropy.units as u
 from astropy.coordinates import SkyCoord
+from astropy.convolution import convolve_fft
 from astropy.modeling import models
 from astropy.table import Table
 from numpy.fft import fftfreq
+from scipy.optimize import OptimizeResult
 
 from musepsf.utils import (
     apply_mask,
@@ -21,7 +23,10 @@ from musepsf.utils import (
     query_gaia,
     rebin,
     remove_close_stars,
+    run_measure_psf,
+    to_minimize,
 )
+from musepsf.utils import _covariance_from_least_squares, _pack_bounds, _prepare_fit_arrays
 from musepsf.plotting import get_norm
 
 
@@ -103,6 +108,38 @@ def test_moffat_kernel_is_normalized_and_centered():
     assert np.unravel_index(np.argmax(kernel.array), kernel.array.shape) == (20, 20)
 
 
+@pytest.mark.parametrize('img_size,expected_shift', [(49, 0.0), (50, None), (51, 0.0)])
+def test_even_sized_kernel_shifts_convolution_centroid(img_size, expected_shift):
+    # Regression/documentation test for KNOWN_ISSUES.md #14: convolve_fft() centers an
+    # even-sized kernel array at a spurious half-pixel offset. A point source injected at the
+    # exact center of a pixel stays exactly centered after convolving with an odd-sized kernel
+    # (img_size=49 or 51 here), but its centroid shifts noticeably (by roughly, though not
+    # exactly, half a pixel) when convolved with an even-sized one (img_size=50, the value
+    # to_minimize()/plot_results()/_prepare_fit_arrays() used before the fix -- they now all use
+    # an odd img_size to avoid this).
+    size = 81
+    img = np.zeros((size, size))
+    img[40, 40] = 1.0
+
+    kernel = moffat_kernel(fwhm=0.8, alpha=2.8, scale=0.2, img_size=img_size)
+    out = convolve_fft(img, kernel)
+    peak = np.unravel_index(np.argmax(out), out.shape)
+
+    from scipy.ndimage import center_of_mass
+    w = 5
+    y0, x0 = peak
+    sub = out[y0 - w:y0 + w + 1, x0 - w:x0 + w + 1]
+    cy, cx = center_of_mass(sub)
+    dy = peak[0] + cy - w - 40
+    dx = peak[1] + cx - w - 40
+
+    if expected_shift is None:
+        assert abs(dy) > 0.1 and abs(dx) > 0.1
+    else:
+        assert dy == pytest.approx(expected_shift, abs=1e-6)
+        assert dx == pytest.approx(expected_shift, abs=1e-6)
+
+
 class TestApplyMask:
     def test_without_starmask_only_nanmask_applies(self):
         image = np.arange(9.0).reshape(3, 3)
@@ -131,6 +168,66 @@ class TestApplyMask:
 
         with pytest.raises(ValueError):
             apply_mask(image, starmask, nanmask)
+
+
+class TestToMinimizeMasking:
+    """
+    Regression tests for KNOWN_ISSUES.md #12: to_minimize() used to return a MaskedArray
+    (function.ravel()), whose mask was silently discarded by whatever consumed it downstream
+    (leastsq/least_squares coerce with np.asarray(), np.nanmean() in rmse_test isn't mask-aware
+    either) -- so masked pixels (star mask, edges, zeros) always leaked into the fit residual
+    with their real value instead of being excluded. Fixed by returning function.compressed().
+    """
+
+    @staticmethod
+    def _synthetic_context(shape=(40, 40), edge=2, scale=0.2):
+        rng = np.random.default_rng(3)
+        reference = rng.normal(10, 1, size=shape)
+        convolved = reference.copy()
+
+        starmask = np.zeros(shape, dtype=bool)
+        starmask[10:15, 10:15] = True
+        zeromask = np.zeros(shape, dtype=bool)
+
+        ctx = _prepare_fit_arrays(reference, zeromask, starmask, edge=edge, scale=scale, oversample=1)
+
+        return convolved, reference, ctx
+
+    def test_return_value_is_plain_array_not_masked(self):
+        convolved, reference, ctx = self._synthetic_context()
+
+        out = to_minimize([0.8], convolved, reference, ctx, alpha0=2.8)
+
+        assert not np.ma.is_masked(out)
+        assert out.size < convolved.size  # edge + star mask really dropped some pixels
+
+    def test_corrupting_masked_pixels_does_not_change_the_residual(self):
+        convolved, reference, ctx = self._synthetic_context()
+        pars = [0.8]
+
+        out_before = to_minimize(pars, convolved, reference, ctx, alpha0=2.8)
+
+        corrupted = convolved.copy()
+        corrupted[ctx.starmask] = 1e6  # only touches pixels inside the (always-masked) star region
+
+        out_after = to_minimize(pars, corrupted, reference, ctx, alpha0=2.8)
+
+        assert out_after == pytest.approx(out_before)
+
+    def test_corrupting_unmasked_pixels_does_change_the_residual(self):
+        # sanity check that the test above isn't vacuously true (e.g. to_minimize ignoring
+        # `convolved` altogether): corrupting an unmasked pixel must move the residual.
+        convolved, reference, ctx = self._synthetic_context()
+        pars = [0.8]
+
+        out_before = to_minimize(pars, convolved, reference, ctx, alpha0=2.8)
+
+        corrupted = convolved.copy()
+        corrupted[20, 20] = 1e6  # well outside the star mask and the dilated edge
+
+        out_after = to_minimize(pars, corrupted, reference, ctx, alpha0=2.8)
+
+        assert not np.allclose(out_after, out_before)
 
 
 class TestApplyOffsetFourier:
@@ -319,6 +416,191 @@ def test_query_gaia_filters_by_classprob(mock_gaia_query):
     assert list(result['phot_g_mean_mag']) == pytest.approx([15.0, 17.0])
     assert set(result.colnames) == {'ra', 'dec', 'parallax', 'phot_g_mean_mag',
                                      'classprob_dsc_combmod_star'}
+
+
+class TestPackBounds:
+    @pytest.mark.parametrize('fit_alpha,offset,expected_len', [
+        (False, False, 1),
+        (True, False, 2),
+        (False, True, 3),
+        (True, True, 4),
+    ])
+    def test_bounds_length_matches_p0_length(self, fit_alpha, offset, expected_len):
+        # must match the p0 length run_measure_psf() builds for the same fit_alpha/offset
+        lower, upper = _pack_bounds(fit_alpha, offset, fwhm_bound=[0.2, 2], alpha_bound=[1, 10],
+                                    dd_bound=[-2, 2])
+        assert len(lower) == len(upper) == expected_len
+
+    def test_bound_ordering_matches_unpack_fit_params(self):
+        # offset=True, fit_alpha=True -> [fwhm, dx, dy, alpha], same order _unpack_fit_params() expects
+        lower, upper = _pack_bounds(fit_alpha=True, offset=True, fwhm_bound=[0.2, 2],
+                                    alpha_bound=[1, 10], dd_bound=[-3, 3])
+        assert lower == [0.2, -3, -3, 1]
+        assert upper == [2, 3, 3, 10]
+
+
+class TestCovarianceFromLeastSquares:
+    def test_matches_manual_formula_for_well_posed_fit(self):
+        jac = np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+        fun = np.array([0.1, -0.2, 0.05])
+        res = OptimizeResult(x=np.zeros(2), jac=jac, fun=fun, cost=0.5 * np.sum(fun**2))
+
+        cov = _covariance_from_least_squares(res)
+
+        dof = fun.size - 2
+        expected = np.linalg.inv(jac.T @ jac) * (2 * res.cost / dof)
+        assert cov == pytest.approx(expected)
+
+    def test_returns_nan_matrix_when_dof_is_not_positive(self):
+        jac = np.eye(2)
+        fun = np.array([0.1, -0.2])  # as many data points as parameters -> dof == 0
+        res = OptimizeResult(x=np.zeros(2), jac=jac, fun=fun, cost=0.5 * np.sum(fun**2))
+
+        cov = _covariance_from_least_squares(res)
+
+        assert cov.shape == (2, 2)
+        assert np.all(np.isnan(cov))
+
+    def test_returns_nan_matrix_when_jtj_is_singular(self):
+        jac = np.array([[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]])  # rank-deficient columns
+        fun = np.array([0.1, -0.2, 0.05])
+        res = OptimizeResult(x=np.zeros(2), jac=jac, fun=fun, cost=0.5 * np.sum(fun**2))
+
+        cov = _covariance_from_least_squares(res)
+
+        assert cov.shape == (2, 2)
+        assert np.all(np.isnan(cov))
+
+
+def _build_synthetic_fit_case():
+    """
+    Deterministic synthetic MUSE/reference pair for the run_measure_psf/rmse_test golden-master
+    tests below (Phase 0 of IMPLEMENTATION_PLAN.md). This is NOT an injection-recovery accuracy
+    test: it exists only to freeze today's numeric output so later refactors (least_squares
+    migration, FitContext) can be checked for non-regression against it. Not meant to assert that
+    the pipeline recovers the injected FWHM accurately.
+    """
+    rng = np.random.default_rng(42)
+    size = 121
+    scale = 0.2
+
+    true_sky = np.zeros((size, size))
+    for _ in range(15):
+        y, x = rng.integers(10, size - 10, size=2)
+        true_sky[y, x] += rng.uniform(5, 20)
+
+    ref_kernel = moffat_kernel(fwhm=0.3, alpha=2.5, scale=scale, img_size=31)
+    psf_ref = ref_kernel.array / ref_kernel.array.sum()
+    reference_data = convolve_fft(true_sky, ref_kernel)
+
+    true_alpha = 2.8
+    muse_kernel = moffat_kernel(fwhm=0.8, alpha=true_alpha, scale=scale, img_size=61)
+    data = convolve_fft(true_sky, muse_kernel)
+
+    zeromask = np.zeros((size, size), dtype=bool)
+    starmask = np.zeros((size, size), dtype=bool)
+
+    return data, reference_data, psf_ref, zeromask, starmask, scale, true_alpha
+
+
+class TestRunMeasurePsfGoldenMaster:
+    """
+    Regression/characterization tests (Phase 0): freeze today's run_measure_psf output on a fixed
+    synthetic case for each fit_alpha/offset combination, so Phase 3 (FitContext refactor) can be
+    checked against these values. `res` is a scipy.optimize.OptimizeResult since Phase 1
+    (leastsq -> least_squares migration).
+
+    The expected values below were re-frozen a second time after KNOWN_ISSUES.md #14 (odd
+    img_size fix for the internal Moffat kernel): before that fix, every case here converged to a
+    spurious ~0.5 pixel dx/dy (even with a zero true offset -- see
+    test_offset_fit_recovers_true_zero_offset below) which also visibly distorted fwhm/alpha in
+    the cases that don't fit for offset (e.g. fit_alpha=True, offset=False used to converge to
+    fwhm=0.838 -- now 0.800, much closer to the true 0.8 injected FWHM).
+    """
+
+    @pytest.mark.parametrize('fit_alpha,offset,expected', [
+        (False, False, [0.80019739]),
+        (False, True, [0.80019736, 0.00002430, -0.00000026]),
+        (True, False, [0.79986968, 2.79658490]),
+        (True, True, [0.79986977, 0.00000432, -0.00000110, 2.79658588]),
+    ])
+    def test_best_fit_matches_frozen_reference(self, fit_alpha, offset, expected):
+        data, reference_data, psf_ref, zeromask, starmask, scale, true_alpha = _build_synthetic_fit_case()
+
+        res, star_pos, starmask_out = run_measure_psf(
+            data, reference_data, psf_ref, None, starmask.copy(), zeromask.copy(),
+            oversample=1, figname=None, alpha=true_alpha, edge=10, fwhm0=0.6,
+            fit_alpha=fit_alpha, plot=False, save=False, show=False, scale=scale, offset=offset,
+        )
+
+        assert res.x == pytest.approx(expected, abs=1e-3)
+        assert star_pos is None
+
+    def test_offset_fit_recovers_true_zero_offset(self):
+        # Regression test for KNOWN_ISSUES.md #14: the internal Moffat model kernel used to be
+        # built with an even img_size (50*oversample), which astropy's convolve_fft centers at a
+        # spurious half-pixel offset from the true center (verified directly against a single
+        # injected point source: convolving with an odd-sized kernel array leaves it exactly
+        # centered, an even-sized one shifts the centroid by ~0.4-0.6 px). Since this synthetic
+        # case's "MUSE" and "reference" images are built from the exact same source pixel grid,
+        # the true dx/dy is exactly 0 -- before the fix, the fit consistently converged to
+        # dx=dy=~0.5 instead (see the parametrized case above, pre-fix values in the class
+        # docstring), a registration offset that was purely a kernel-centering artifact.
+        data, reference_data, psf_ref, zeromask, starmask, scale, true_alpha = _build_synthetic_fit_case()
+
+        res, *_ = run_measure_psf(
+            data, reference_data, psf_ref, None, starmask.copy(), zeromask.copy(),
+            oversample=1, figname=None, alpha=true_alpha, edge=10, fwhm0=0.6,
+            fit_alpha=False, plot=False, save=False, show=False, scale=scale, offset=True,
+        )
+
+        assert res.x[1] == pytest.approx(0.0, abs=1e-3)
+        assert res.x[2] == pytest.approx(0.0, abs=1e-3)
+
+    def test_covariance_is_attached_and_well_formed(self):
+        data, reference_data, psf_ref, zeromask, starmask, scale, true_alpha = _build_synthetic_fit_case()
+
+        res, *_ = run_measure_psf(
+            data, reference_data, psf_ref, None, starmask.copy(), zeromask.copy(),
+            oversample=1, figname=None, alpha=true_alpha, edge=10, fwhm0=0.6,
+            fit_alpha=False, plot=False, save=False, show=False, scale=scale, offset=False,
+        )
+
+        assert res.cov.shape == (1, 1)
+        assert res.cov[0, 0] > 0
+
+    def test_converges_cleanly_to_the_bound_when_the_true_optimum_lies_outside_it(self):
+        # Phase 1 (IMPLEMENTATION_PLAN.md): with real bounds (least_squares), a true optimum
+        # outside fwhm_bound should make the fit converge smoothly to the bound itself, rather
+        # than relying on to_minimize()'s internal 1e10 penalty hack (still there for rmse_test's
+        # manual grid scan, but no longer load-bearing for the optimizer itself).
+        rng = np.random.default_rng(42)
+        size = 121
+        scale = 0.2
+        true_sky = np.zeros((size, size))
+        for _ in range(15):
+            y, x = rng.integers(10, size - 10, size=2)
+            true_sky[y, x] += rng.uniform(5, 20)
+
+        ref_kernel = moffat_kernel(fwhm=0.3, alpha=2.5, scale=scale, img_size=31)
+        psf_ref = ref_kernel.array / ref_kernel.array.sum()
+        reference_data = convolve_fft(true_sky, ref_kernel)
+
+        # true FWHM well above the default fwhm_bound upper limit of 2.0
+        muse_kernel = moffat_kernel(fwhm=3.0, alpha=2.8, scale=scale, img_size=61)
+        data = convolve_fft(true_sky, muse_kernel)
+
+        zeromask = np.zeros((size, size), dtype=bool)
+        starmask = np.zeros((size, size), dtype=bool)
+
+        res, *_ = run_measure_psf(
+            data, reference_data, psf_ref, None, starmask, zeromask,
+            oversample=1, figname=None, alpha=2.8, edge=10, fwhm0=0.6,
+            fit_alpha=False, plot=False, save=False, show=False, scale=scale, offset=False,
+        )
+
+        assert res.success
+        assert res.x[0] == pytest.approx(2.0)
 
 
 def test_download_ps_file_builds_expected_url_and_calls_wget(mock_wget_download, tmp_path):
